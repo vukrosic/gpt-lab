@@ -1,5 +1,15 @@
 I'm messing around with modded-nanoGPT to see if it'd be a good (cheap) base for experiments. Preferably I'd like to be able to test any new code on two 4060Ti's or similar and then have the same file run on 8xH100s when it's time to do an actual run.
 
+thoughts:
+- i'd have to put significant time into explaining a lot of this code
+- there's no inference function; this repo is literally designed for only training. luckily that's a relatively simple mostly copy & paste fix
+- the current code for downloading pre-tokenized-with-GPT2's-tokenizer fineweb data is definitely convenient. however if i wanted to create the option for custom tokenizers I'd have to pull the tokenizer out of fineweb.py and make sure it also gets printed in `records/`
+- i'd have to create some sort of benchmarking setup; i think karpathy's guide on building nanoGPT has one that's relatively easy to use
+- some of the optimizations made here, while i believe they speed things up, create a lot of unnecessary complication when one might want to just edit off of a more traditional looking GPT
+- i think this is out of scope and i've not yet done the math to check, but i'm curious whether we can go slightly over the 124m size on an 8-GPU node, whether that be the recommended H100s newer blackwell chips once thsoe come out. if we're actually sticking to the 3.28 CEloss target then that'd still be reasonably cheap
+- we'd need to edit the code to a standardized number of tokens rather than shooting for that 3.28 CELoss target every time, especially if i'm gonna implement benchmarking script
+- 
+
 # Modded-NanoGPT (ORIGINAL README)
 
 This repository hosts the *NanoGPT speedrun*, in which we (collaboratively|competitively) search for the fastest algorithm to use 8 NVIDIA H100 GPUs to train a language model that attains 3.28 cross-entropy loss on the [FineWeb](https://huggingface.co/datasets/HuggingFaceFW/fineweb) validation set.
