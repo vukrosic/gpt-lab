@@ -1,4 +1,6 @@
-# Modded-NanoGPT
+I'm messing around with modded-nanoGPT to see if it'd be a good (cheap) base for experiments. Preferably I'd like to be able to test any new code on two 4060Ti's or similar and then have the same file run on 8xH100s when it's time to do an actual run.
+
+# Modded-NanoGPT (ORIGINAL README)
 
 This repository hosts the *NanoGPT speedrun*, in which we (collaboratively|competitively) search for the fastest algorithm to use 8 NVIDIA H100 GPUs to train a language model that attains 3.28 cross-entropy loss on the [FineWeb](https://huggingface.co/datasets/HuggingFaceFW/fineweb) validation set.
 
