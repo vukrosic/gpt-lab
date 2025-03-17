@@ -9,7 +9,6 @@ import glob
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-import itertools
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch
@@ -502,19 +501,19 @@ class Hyperparameters:
     train_files = "data/fineweb10B/fineweb_train_*.bin" # input .bin to train on
     val_files = "data/fineweb10B/fineweb_val_*.bin" # input .bin to eval validation loss on
     val_tokens = 10485760 # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
-    train_seq_len = 16*1024 # FlexAttention sequence length - reduced from 48*1024 for RTX 40 series w/ at least 8GB VRAM
+    train_seq_len = 16*1024 # FlexAttention sequence length - reduced from 48*1024 for RTX 4060 Ti
     val_seq_len = 16*1024 # FlexAttention sequence length for validation - reduced from 4*64*1024
     # optimization
     num_iterations = 1000 # number of iterations to run - reduced from 1770
     cooldown_frac = 0.4 # fraction of training spent cooling down the learning rate
     # architecture
     vocab_size = 50257
-    # model size - new parameters for RTX 40 series w/ at least 8GB VRAM
+    # model size - new parameters for RTX 4060 Ti
     num_layers = 6  # reduced from 12
     num_heads = 4   # reduced from 6
     model_dim = 256  # increased from 128 to make it divisible by num_heads (256 / 4 = 64)
-    # memory optimization for RTX 40 series w/ at least 8GB VRAM
-    use_fp8 = False # Set to False as FP8 might not be supported on RTX 40 series w/ at least 8GB VRAM
+    # memory optimization for RTX 4060 Ti
+    use_fp8 = False # Set to False as FP8 might not be supported on RTX 4060 Ti
     # evaluation and logging
     val_loss_every = 100 # every how many steps to evaluate val loss? 0 for only at the end
     save_checkpoint = False
@@ -525,7 +524,7 @@ rank = int(os.environ["RANK"])
 world_size = int(os.environ["WORLD_SIZE"])
 # Remove assertion for 8xH100
 # assert world_size == 8 # this code is designed for 8xH100
-print(f"Running with {world_size} GPUs (designed originally for 8xH100, adapted to also support 2x RTX 40 series w/ at least 8GB VRAM)")
+print(f"Running with {world_size} GPUs (designed originally for 8xH100, adapted to also support 2x RTX 4060 Ti)")
 assert torch.cuda.is_available()
 device = torch.device("cuda", int(os.environ["LOCAL_RANK"]))
 torch.cuda.set_device(device)
@@ -629,7 +628,7 @@ def get_window_size_blocks_helper(window_size: int):
 def get_window_size_blocks(step: int):
     x = step / args.num_iterations # progress in training
     assert 0 <= x <= 1
-    # Linearly increase the block-wise sliding window size over training 128 -> 896 (reduced for RTX 40 series w/ at least 8GB VRAM)
+    # Linearly increase the block-wise sliding window size over training 128 -> 896 (reduced for RTX 4060 Ti)
     # increase by @fernbear.bsky.social; block-wise by @YouJiacheng
     window_size = next_multiple_of_n(768 * x, n=128)
     return get_window_size_blocks_helper(window_size)
@@ -646,7 +645,7 @@ torch._dynamo.config.suppress_errors = True
 #            Warmup kernels            #
 ########################################
 
-# Add memory management for RTX 40 series w/ at least 8GB VRAM
+# Add memory management for RTX 4060 Ti
 # Set memory usage behavior - more conservative for consumer GPUs
 torch.cuda.empty_cache()
 # Attempt to limit memory fragmentation
@@ -704,7 +703,7 @@ for step in range(train_steps + 1):
         # Clear memory before validation
         torch.cuda.empty_cache()
         
-        # Use smaller val batch for RTX 40 series w/ at least 8GB VRAM
+        # Use smaller val batch for RTX 4060 Ti
         val_batch_size = world_size * args.val_seq_len
         # Ensure we validate on enough tokens while keeping memory usage reasonable
         val_steps = max(1, min(16, args.val_tokens // val_batch_size))
@@ -782,3 +781,310 @@ for step in range(train_steps + 1):
 print0(f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB "
        f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB", console=True)
 dist.destroy_process_group()
+
+
+====================================================================================================
+sample.py:
+====================================================================================================
+"""
+Sample from a trained model
+"""
+import os
+import pickle
+from contextlib import nullcontext
+import torch
+import tiktoken
+from model import GPTConfig, GPT
+
+# -----------------------------------------------------------------------------
+init_from = 'resume' # either 'resume' (from an out_dir) or a gpt2 variant (e.g. 'gpt2-xl')
+out_dir = 'out' # ignored if init_from is not 'resume'
+start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
+num_samples = 10 # number of samples to draw
+max_new_tokens = 500 # number of tokens generated in each sample
+temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
+top_k = 200 # retain only the top_k most likely tokens, clamp others to have 0 probability
+seed = 1337
+device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
+dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32' or 'bfloat16' or 'float16'
+compile = False # use PyTorch 2.0 to compile the model to be faster
+exec(open('configurator.py').read()) # overrides from command line or config file
+# -----------------------------------------------------------------------------
+
+torch.manual_seed(seed)
+torch.cuda.manual_seed(seed)
+torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
+torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
+device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.autocast
+ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
+ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+
+# model
+if init_from == 'resume':
+    # init from a model saved in a specific directory
+    ckpt_path = os.path.join(out_dir, 'ckpt.pt')
+    checkpoint = torch.load(ckpt_path, map_location=device)
+    gptconf = GPTConfig(**checkpoint['model_args'])
+    model = GPT(gptconf)
+    state_dict = checkpoint['model']
+    unwanted_prefix = '_orig_mod.'
+    for k,v in list(state_dict.items()):
+        if k.startswith(unwanted_prefix):
+            state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+    model.load_state_dict(state_dict)
+elif init_from.startswith('gpt2'):
+    # init from a given GPT-2 model
+    model = GPT.from_pretrained(init_from, dict(dropout=0.0))
+
+model.eval()
+model.to(device)
+if compile:
+    model = torch.compile(model) # requires PyTorch 2.0 (optional)
+
+# look for the meta pickle in case it is available in the dataset folder
+load_meta = False
+if init_from == 'resume' and 'config' in checkpoint and 'dataset' in checkpoint['config']: # older checkpoints might not have these...
+    meta_path = os.path.join('data', checkpoint['config']['dataset'], 'meta.pkl')
+    load_meta = os.path.exists(meta_path)
+if load_meta:
+    print(f"Loading meta from {meta_path}...")
+    with open(meta_path, 'rb') as f:
+        meta = pickle.load(f)
+    # TODO want to make this more general to arbitrary encoder/decoder schemes
+    stoi, itos = meta['stoi'], meta['itos']
+    encode = lambda s: [stoi[c] for c in s]
+    decode = lambda l: ''.join([itos[i] for i in l])
+else:
+    # ok let's assume gpt-2 encodings by default
+    print("No meta.pkl found, assuming GPT-2 encodings...")
+    enc = tiktoken.get_encoding("gpt2")
+    encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
+    decode = lambda l: enc.decode(l)
+
+# encode the beginning of the prompt
+if start.startswith('FILE:'):
+    with open(start[5:], 'r', encoding='utf-8') as f:
+        start = f.read()
+start_ids = encode(start)
+x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
+
+# run generation
+with torch.no_grad():
+    with ctx:
+        for k in range(num_samples):
+            y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
+            print(decode(y[0].tolist()))
+            print('---------------')
+
+====================================================================================================
+hellaswag.py:
+====================================================================================================
+"""
+Downloads and evaluates HellaSwag in Python.
+https://github.com/rowanz/hellaswag
+
+Example HellaSwag json item:
+
+{"ind": 24, "activity_label": "Roof shingle removal", "ctx_a": "A man is sitting on a roof.", "ctx_b": "he", "ctx": "A man is sitting on a roof. he", "split": "val", "split_type": "indomain", "label": 3, "endings": ["is using wrap to wrap a pair of skis.", "is ripping level tiles off.", "is holding a rubik's cube.", "starts pulling up roofing on a roof."], "source_id": "activitynet~v_-JhWjGDPHMY"}
+
+ind: dataset ID
+activity_label: The ActivityNet or WikiHow label for this example
+context: There are two formats. The full context is in ctx. When the context ends in an (incomplete) noun phrase, like for ActivityNet, this incomplete noun phrase is in ctx_b, and the context up until then is in ctx_a. This can be useful for models such as BERT that need the last sentence to be complete. However, it's never required. If ctx_b is nonempty, then ctx is the same thing as ctx_a, followed by a space, then ctx_b.
+endings: a list of 4 endings. The correct index is given by label (0,1,2, or 3)
+split: train, val, or test.
+split_type: indomain if the activity label is seen during training, else zeroshot
+source_id: Which video or WikiHow article this example came from
+
+gpt2 (124M)
+- eleuther harness reports acc 28.92%, acc_norm 31.14% (multiple choice style)
+- this script: 10042 acc: 0.2859 acc_norm: 0.2955 (completion style)
+
+gpt2-xl (1558M)
+- eleuther harness reports acc 40.04%, acc_norm 50.89% (multiple choice style)
+- this script: 10042 acc: 0.3842 acc_norm: 0.4893 (completion style)
+
+The validation set of HellaSwag has a total of 10,042 examples.
+"""
+
+import os
+import json
+import requests
+import tiktoken
+from tqdm import tqdm
+import torch
+import torch.nn as nn
+from torch.nn import functional as F
+from transformers import GPT2LMHeadModel
+
+# -----------------------------------------------------------------------------
+DATA_CACHE_DIR = os.path.join(os.path.dirname(__file__), "hellaswag")
+
+def download_file(url: str, fname: str, chunk_size=1024):
+    """Helper function to download a file from a given url"""
+    resp = requests.get(url, stream=True)
+    total = int(resp.headers.get("content-length", 0))
+    with open(fname, "wb") as file, tqdm(
+        desc=fname,
+        total=total,
+        unit="iB",
+        unit_scale=True,
+        unit_divisor=1024,
+    ) as bar:
+        for data in resp.iter_content(chunk_size=chunk_size):
+            size = file.write(data)
+            bar.update(size)
+
+hellaswags = {
+    "train": "https://raw.githubusercontent.com/rowanz/hellaswag/master/data/hellaswag_train.jsonl",
+    "val": "https://raw.githubusercontent.com/rowanz/hellaswag/master/data/hellaswag_val.jsonl",
+    "test": "https://raw.githubusercontent.com/rowanz/hellaswag/master/data/hellaswag_test.jsonl",
+}
+
+enc = tiktoken.get_encoding("gpt2")
+
+def download(split):
+    """Downloads HellaSwag DATA_CACHE_DIR"""
+    os.makedirs(DATA_CACHE_DIR, exist_ok=True)
+    data_url = hellaswags[split]
+    data_filename = os.path.join(DATA_CACHE_DIR, f"hellaswag_{split}.jsonl")
+    if not os.path.exists(data_filename):
+        print(f"Downloading {data_url} to {data_filename}...")
+        download_file(data_url, data_filename)
+
+def render_example(example):
+    """
+    Given the example as a dictionary, render it as three torch tensors:
+    - tokens (the tokens of context + completion, of size 4xN, as there are always 4 candidates)
+    - mask (is 1 in the region of the candidate completion, where we evaluate likelihoods)
+    - label (the index of the correct completion, which we hope has the highest likelihood)
+    """
+    ctx = example["ctx"]
+    label = example["label"]
+    endings = example["endings"]
+
+    # data needed to reproduce this eval on the C size
+    data = {
+        "label": label,
+        "ctx_tokens": None,
+        "ending_tokens": [],
+    }
+
+    # gather up all the tokens
+    ctx_tokens = enc.encode(ctx)
+    data["ctx_tokens"] = ctx_tokens
+    tok_rows = []
+    mask_rows = []
+    for end in endings:
+        end_tokens = enc.encode(" " + end) # note: prepending " " because GPT-2 tokenizer
+        tok_rows.append(ctx_tokens + end_tokens)
+        mask_rows.append([0]*len(ctx_tokens) + [1]*len(end_tokens))
+        data["ending_tokens"].append(end_tokens)
+
+    # have to be careful during the collation because the number of tokens in each row can differ
+    max_len = max(len(row) for row in tok_rows)
+    tokens = torch.zeros((4, max_len), dtype=torch.long)
+    mask = torch.zeros((4, max_len), dtype=torch.long)
+    for i, (tok_row, mask_row) in enumerate(zip(tok_rows, mask_rows)):
+        tokens[i, :len(tok_row)] = torch.tensor(tok_row)
+        mask[i, :len(mask_row)] = torch.tensor(mask_row)
+
+    return data, tokens, mask, label
+
+def iterate_examples(split):
+    # there are 10,042 examples in total in val
+    download(split)
+    with open(os.path.join(DATA_CACHE_DIR, f"hellaswag_{split}.jsonl"), "r") as f:
+        for line in f:
+            example = json.loads(line)
+            yield example
+
+@torch.no_grad()
+def evaluate(model_type, device):
+
+    torch.set_float32_matmul_precision('high') # use tf32
+    model = GPT2LMHeadModel.from_pretrained(model_type)
+    model.to(device)
+    # model = torch.compile(model) # optionally torch compile the model
+
+    num_correct_norm = 0
+    num_correct = 0
+    num_total = 0
+    for example in iterate_examples("val"):
+        data, tokens, mask, label = render_example(example)
+        tokens = tokens.to(device)
+        mask = mask.to(device)
+
+        # get the logits
+        logits = model(tokens).logits
+        # evaluate the autoregressive loss at all positions
+        shift_logits = (logits[..., :-1, :]).contiguous()
+        shift_tokens = (tokens[..., 1:]).contiguous()
+        flat_shift_logits = shift_logits.view(-1, shift_logits.size(-1))
+        flat_shift_tokens = shift_tokens.view(-1)
+        shift_losses = F.cross_entropy(flat_shift_logits, flat_shift_tokens, reduction='none')
+        shift_losses = shift_losses.view(tokens.size(0), -1)
+        # now get the average loss just for the completion region (where mask == 1), in each row
+        shift_mask = (mask[..., 1:]).contiguous() # we must shift mask, so we start at the last prompt token
+        masked_shift_losses = shift_losses * shift_mask
+        # sum and divide by the number of 1s in the mask
+        sum_loss = masked_shift_losses.sum(dim=1)
+        avg_loss = sum_loss / shift_mask.sum(dim=1)
+        # now we have a loss for each of the 4 completions
+        # the one with the lowest loss should be the most likely
+        pred = sum_loss.argmin().item()
+        pred_norm = avg_loss.argmin().item()
+
+        # accumulate stats
+        num_total += 1
+        num_correct += int(pred == label)
+        num_correct_norm += int(pred_norm == label)
+        print(f"{num_total} acc_norm: {num_correct_norm}/{num_total}={num_correct_norm/num_total:.4f}")
+
+        # debug: pretty print a few examples, and the losses in each case
+        if num_total < 10:
+            print("---")
+            print(f"Context:\n {example['ctx']}")
+            print(f"Endings:")
+            for i, end in enumerate(example["endings"]):
+                print(f"{i} (loss: {avg_loss[i].item():.4f}) {end}")
+            print(f"predicted: {pred_norm}, actual: {label}")
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-m", "--model_type", type=str, default="gpt2", help="the model type to use")
+    parser.add_argument("-d", "--device", type=str, default="cuda", help="the device to use")
+    args = parser.parse_args()
+    evaluate(args.model_type, args.device)
+====================================================================================================
+Running Python 3.11.10 | packaged by conda-forge | (main, Oct 16 2024, 01:27:36) [GCC 13.3.0]
+Running PyTorch 2.5.1+cu124 compiled for CUDA 12.4
+Mon Mar 17 13:11:08 2025       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 550.40.07              Driver Version: 550.40.07      CUDA Version: 12.4     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 4070 ...    On  |   00000000:01:00.0 Off |                  N/A |
+|  0%   36C    P2             30W /  220W |     528MiB /  12282MiB |      3%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+|   1  NVIDIA GeForce RTX 4070 ...    On  |   00000000:03:00.0 Off |                  N/A |
+|  0%   37C    P2             14W /  220W |     316MiB /  12282MiB |      6%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI        PID   Type   Process name                              GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
++-----------------------------------------------------------------------------------------+
+
+====================================================================================================
+Initial GPU memory: 191 MB
+After warmup GPU memory: 202 MB
+WARNING: Training on single shard; will run multiple epochs. This should only be used for testing.
+Validating on 524288 tokens (16 steps with 32768 batch size)

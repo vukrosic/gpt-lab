@@ -10,6 +10,11 @@ thoughts:
 - we'd need to edit the code to a standardized number of tokens rather than shooting for that 3.28 CELoss target every time, especially if i'm gonna implement benchmarking script
 - 
 
+for two GPUs (testing):
+```
+torchrun --nproc_per_node=2 train_gpt.py
+```
+
 # Modded-NanoGPT (ORIGINAL README)
 
 This repository hosts the *NanoGPT speedrun*, in which we (collaboratively|competitively) search for the fastest algorithm to use 8 NVIDIA H100 GPUs to train a language model that attains 3.28 cross-entropy loss on the [FineWeb](https://huggingface.co/datasets/HuggingFaceFW/fineweb) validation set.
