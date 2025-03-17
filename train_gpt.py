@@ -583,13 +583,6 @@ def print0(s, console=False):
 
 # begin by printing all relevant files
 print0(code)  # Print this file's code
-# Print sample.py if it exists
-try:
-    with open("sample.py", "r") as f:
-        print0("\n" + "="*100 + "\nsample.py:\n" + "="*100)
-        print0(f.read())
-except FileNotFoundError:
-    print0("\n" + "="*100 + "\nsample.py not found\n" + "="*100)
 
 # Print hellaswag.py if it exists
 try:
