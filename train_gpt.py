@@ -292,9 +292,9 @@ class CausalSelfAttention(nn.Module):
         return y
 
 class MLP(nn.Module):
-    def __init__(self, dim: int):
+    def __init__(self, dim: int, mlp_ratio: int = 4):
         super().__init__()
-        hdim = 4 * dim
+        hdim = int(mlp_ratio * dim)
         self.c_fc = CastedLinear(dim, hdim)
         self.c_proj = CastedLinear(hdim, dim)
         self.c_proj.weight.detach().zero_() # zero init suggested by @Grad62304977
@@ -306,13 +306,13 @@ class MLP(nn.Module):
         return x
 
 class Block(nn.Module):
-    def __init__(self, dim: int, num_heads: int, max_seq_len: int, layer_idx: int):
+    def __init__(self, dim: int, num_heads: int, mlp_ratio: int, max_seq_len: int, layer_idx: int):
         super().__init__()
         # skip attention of blocks.7 (the 8th layer) by @YouJiacheng
         # Adjusted for smaller models - only skip if we have enough layers
         skip_attn = (layer_idx == 7) and (dim > 512)  # Only skip in larger models
         self.attn = CausalSelfAttention(dim, num_heads, max_seq_len) if not skip_attn else None
-        self.mlp = MLP(dim)
+        self.mlp = MLP(dim, mlp_ratio)
         self.lambdas = nn.Parameter(torch.tensor([1., 0.]))
 
     def forward(self, x: Tensor, ve: Tensor | None, x0: Tensor, block_mask: BlockMask):
@@ -329,13 +329,13 @@ def next_multiple_of_n(v: float | int, *, n: int):
     return next(x for x in range(n, int(v) + 1 + n, n) if x >= v)
 
 class GPT(nn.Module):
-    def __init__(self, vocab_size: int, num_layers: int, num_heads: int, model_dim: int, max_seq_len: int):
+    def __init__(self, vocab_size: int, num_layers: int, num_heads: int, model_dim: int, max_seq_len: int, mlp_ratio: int):
         super().__init__()
         self.embed = nn.Embedding(vocab_size, model_dim)
         # token value embeddings by @KoszarskyB - inspired by @Grad62304977's value residual implementation following https://arxiv.org/abs/2410.17897
         # value embedding code simplification inspired by @ragulpr https://github.com/KellerJordan/modded-nanogpt/pull/78
         self.value_embeds = nn.ModuleList([nn.Embedding(vocab_size, model_dim) for _ in range(3)])
-        self.blocks = nn.ModuleList([Block(model_dim, num_heads, max_seq_len, i) for i in range(num_layers)])
+        self.blocks = nn.ModuleList([Block(model_dim, num_heads, mlp_ratio, max_seq_len, i) for i in range(num_layers)])
         # there are only 50257 unique GPT-2 tokens; we extend to nearest multiple of 128 for efficiency.
         # suggested to me by @Grad62304977. this originates from Karpathy's experiments.
         self.lm_head = CastedLinear(model_dim, next_multiple_of_n(vocab_size, n=128),
@@ -502,22 +502,38 @@ class Hyperparameters:
     train_files = "data/fineweb10B/fineweb_train_*.bin" # input .bin to train on
     val_files = "data/fineweb10B/fineweb_val_*.bin" # input .bin to eval validation loss on
     val_tokens = 10485760 # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
-    train_seq_len = 16*1024 # FlexAttention sequence length - reduced from 48*1024 for RTX 40 series w/ at least 8GB VRAM
+    train_seq_len = 16*1024 # FlexAttention sequence length - reduced from 48*1024 for RTX 40 series w/ at least 8GB VRAM during testing
     val_seq_len = 16*1024 # FlexAttention sequence length for validation - reduced from 4*64*1024
     # optimization
     num_iterations = 1000 # number of iterations to run - reduced from 1770
     cooldown_frac = 0.4 # fraction of training spent cooling down the learning rate
     # architecture
     vocab_size = 50257
-    # model size - new parameters for RTX 40 series w/ at least 8GB VRAM
-    num_layers = 6  # reduced from 12
-    num_heads = 4   # reduced from 6
-    model_dim = 256  # increased from 128 to make it divisible by num_heads (256 / 4 = 64)
-    # memory optimization for RTX 40 series w/ at least 8GB VRAM
-    use_fp8 = False # Set to False as FP8 might not be supported on RTX 40 series w/ at least 8GB VRAM
+    # model size - new parameters for RTX 40 series w/ at least 8GB VRAM during testing
+    num_layers = 6  # 124m param model should be 12
+    num_heads = 6   # 124m param model should be 6
+    model_dim = 384  # must be divisible by num_heads
+    head_dim = None  # if None, will be set to model_dim // num_heads
+    mlp_ratio = 4  # 124m param model should be 4
+    # memory optimization for RTX 40 series w/ at least 8GB VRAM during testing
+    use_fp8 = False # Set to False as FP8 might not be supported on RTX 40 series w/ at least 8GB VRAM during testing
     # evaluation and logging
     val_loss_every = 100 # every how many steps to evaluate val loss? 0 for only at the end
     save_checkpoint = False
+
+    def __post_init__(self):
+        # Validate and set derived parameters
+        if self.head_dim is None:
+            self.head_dim = self.model_dim // self.num_heads
+        assert self.head_dim in [2 ** i for i in range(1, 10)], f"head_dim must be a power of 2, got {self.head_dim}"
+        
+        # Validate MLP ratio
+        assert self.mlp_ratio > 0, f"mlp_ratio must be positive, got {self.mlp_ratio}"
+        
+        # Validate sequence lengths
+        assert self.train_seq_len % 128 == 0, f"train_seq_len must be multiple of 128, got {self.train_seq_len}"
+        assert self.val_seq_len % 128 == 0, f"val_seq_len must be multiple of 128, got {self.val_seq_len}"
+
 args = Hyperparameters()
 
 # torchrun sets these env variables
@@ -525,7 +541,7 @@ rank = int(os.environ["RANK"])
 world_size = int(os.environ["WORLD_SIZE"])
 # Remove assertion for 8xH100
 # assert world_size == 8 # this code is designed for 8xH100
-print(f"Running with {world_size} GPUs (designed originally for 8xH100, adapted to also support 2x RTX 40 series w/ at least 8GB VRAM)")
+print(f"Running with {world_size} GPUs (designed originally for 8xH100, adapted to also support 2x RTX 40 series w/ at least 8GB VRAM during testing)")
 assert torch.cuda.is_available()
 device = torch.device("cuda", int(os.environ["LOCAL_RANK"]))
 torch.cuda.set_device(device)
@@ -584,7 +600,8 @@ model: nn.Module = GPT(vocab_size=args.vocab_size,
                        num_layers=args.num_layers,
                        num_heads=args.num_heads, 
                        model_dim=args.model_dim,
-                       max_seq_len=max(args.train_seq_len, args.val_seq_len)).cuda()
+                       max_seq_len=max(args.train_seq_len, args.val_seq_len),
+                       mlp_ratio=args.mlp_ratio).cuda()
 
 # Set FP8 option based on hyperparameters
 model.lm_head.use_fp8 = args.use_fp8
@@ -629,7 +646,7 @@ def get_window_size_blocks_helper(window_size: int):
 def get_window_size_blocks(step: int):
     x = step / args.num_iterations # progress in training
     assert 0 <= x <= 1
-    # Linearly increase the block-wise sliding window size over training 128 -> 896 (reduced for RTX 40 series w/ at least 8GB VRAM)
+    # Linearly increase the block-wise sliding window size over training 128 -> 896 (reduced for RTX 40 series w/ at least 8GB VRAM during testing)
     # increase by @fernbear.bsky.social; block-wise by @YouJiacheng
     window_size = next_multiple_of_n(768 * x, n=128)
     return get_window_size_blocks_helper(window_size)
@@ -646,7 +663,7 @@ torch._dynamo.config.suppress_errors = True
 #            Warmup kernels            #
 ########################################
 
-# Add memory management for RTX 40 series w/ at least 8GB VRAM
+# Add memory management for RTX 40 series w/ at least 8GB VRAM during testing
 # Set memory usage behavior - more conservative for consumer GPUs
 torch.cuda.empty_cache()
 # Attempt to limit memory fragmentation
@@ -704,7 +721,7 @@ for step in range(train_steps + 1):
         # Clear memory before validation
         torch.cuda.empty_cache()
         
-        # Use smaller val batch for RTX 40 series w/ at least 8GB VRAM
+        # Use smaller val batch for RTX 40 series w/ at least 8GB VRAM during testing
         val_batch_size = world_size * args.val_seq_len
         # Ensure we validate on enough tokens while keeping memory usage reasonable
         val_steps = max(1, min(16, args.val_tokens // val_batch_size))
