@@ -505,7 +505,7 @@ class Hyperparameters:
     train_seq_len = 16*1024 # FlexAttention sequence length - reduced from 48*1024 for RTX 40 series w/ at least 8GB VRAM during testing
     val_seq_len = 16*1024 # FlexAttention sequence length for validation - reduced from 4*64*1024
     # optimization
-    num_iterations = 1000 # number of iterations to run - reduced from 1770
+    num_iterations = 20 # number of iterations to run
     cooldown_frac = 0.4 # fraction of training spent cooling down the learning rate
     # architecture
     vocab_size = 50257
@@ -516,7 +516,7 @@ class Hyperparameters:
     head_dim = None  # if None, will be set to model_dim // num_heads
     mlp_ratio = 4  # 124m param model should be 4
     # memory optimization for RTX 40 series w/ at least 8GB VRAM during testing
-    use_fp8 = False # Set to False as FP8 might not be supported on RTX 40 series w/ at least 8GB VRAM during testing
+    use_fp8 = False # Set to True on H100s and newer, False on older
     # evaluation and logging
     val_loss_every = 100 # every how many steps to evaluate val loss? 0 for only at the end
     save_checkpoint = False
@@ -663,9 +663,6 @@ torch._dynamo.config.suppress_errors = True
 #            Warmup kernels            #
 ########################################
 
-# Add memory management for RTX 40 series w/ at least 8GB VRAM during testing
-# Set memory usage behavior - more conservative for consumer GPUs
-torch.cuda.empty_cache()
 # Attempt to limit memory fragmentation
 if hasattr(torch.cuda, 'memory_stats'):
     print0(f"Initial GPU memory: {torch.cuda.memory_allocated() // (1024 * 1024)} MB")
@@ -686,7 +683,6 @@ model.load_state_dict(initial_state["model"])
 for opt, opt_state in zip(optimizers, initial_state["optimizers"]):
     opt.load_state_dict(opt_state)
 del initial_state
-torch.cuda.empty_cache()
 
 if hasattr(torch.cuda, 'memory_stats'):
     print0(f"After warmup GPU memory: {torch.cuda.memory_allocated() // (1024 * 1024)} MB")
@@ -718,9 +714,6 @@ for step in range(train_steps + 1):
         training_time_ms += 1000 * (time.perf_counter() - t0)
         model.eval()
         
-        # Clear memory before validation
-        torch.cuda.empty_cache()
-        
         # Use smaller val batch for RTX 40 series w/ at least 8GB VRAM during testing
         val_batch_size = world_size * args.val_seq_len
         # Ensure we validate on enough tokens while keeping memory usage reasonable
@@ -740,16 +733,10 @@ for step in range(train_steps + 1):
                     inputs = inputs[:args.val_seq_len]
                     targets = targets[:args.val_seq_len]
                 val_loss += model(inputs, targets, get_window_size_blocks(step))
-                # Free up memory after each validation step
-                if i < val_steps - 1:  # Don't need to clear after the last step
-                    torch.cuda.empty_cache()
         val_loss /= val_steps
         del val_loader
         dist.all_reduce(val_loss, op=dist.ReduceOp.AVG)
         print0(f"step:{step}/{train_steps} val_loss:{val_loss:.4f} train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms/max(step, 1):.2f}ms", console=True)
-        
-        # Clear memory after validation
-        torch.cuda.empty_cache()
         
         model.train()
         # start the clock again
@@ -787,10 +774,6 @@ for step in range(train_steps + 1):
         opt.step()
     # null the gradients
     model.zero_grad(set_to_none=True)
-    
-    # Periodically clean GPU memory to reduce fragmentation
-    if step % 10 == 0:
-        torch.cuda.empty_cache()
         
     # logging
     approx_training_time_ms = training_time_ms + 1000 * (time.perf_counter() - t0)
