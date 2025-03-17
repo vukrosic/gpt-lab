@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 import itertools
+import tiktoken
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch
@@ -18,7 +19,7 @@ from torch import Tensor, nn
 import torch.nn.functional as F
 import torch.distributed as dist
 # use of FlexAttention contributed by @KoszarskyB
-from torch.nn.attention.flex_attention import BlockMask, flex_attention
+from torch.nn.attention.flex_attention import BlockMask, flex_attention, create_block_mask
 #torch._inductor.config.coordinate_descent_tuning = True # we have banned this flag for new records because it causes compilation to take 30min
 
 # -----------------------------------------------------------------------------
@@ -240,7 +241,7 @@ class Rotary(nn.Module):
         angular_freq = (1 / 1024) ** torch.linspace(0, 1, steps=dim_quarter, dtype=torch.float32)
         angular_freq = torch.cat([angular_freq, angular_freq.new_zeros(dim_quarter)])
         t = torch.arange(max_seq_len, dtype=torch.float32)
-        theta = torch.einsum("i,j -> ij", t, angular_freq)
+        theta = torch.einsum("i,j -> ij", t, angular_freq) # outer product
         self.cos = nn.Buffer(theta.cos(), persistent=False)
         self.sin = nn.Buffer(theta.sin(), persistent=False)
 
@@ -331,6 +332,7 @@ def next_multiple_of_n(v: float | int, *, n: int):
 class GPT(nn.Module):
     def __init__(self, vocab_size: int, num_layers: int, num_heads: int, model_dim: int, max_seq_len: int, mlp_ratio: int):
         super().__init__()
+        self.max_seq_len = max_seq_len
         self.embed = nn.Embedding(vocab_size, model_dim)
         # token value embeddings by @KoszarskyB - inspired by @Grad62304977's value residual implementation following https://arxiv.org/abs/2410.17897
         # value embedding code simplification inspired by @ragulpr https://github.com/KellerJordan/modded-nanogpt/pull/78
@@ -385,31 +387,33 @@ class GPT(nn.Module):
         # Long-short SWA block masks by @leloykun & @YouJiacheng, adapated from suggestion by @Grad62304977, following Gemma 2 paper
         return build_bm(sliding_window_num_blocks), build_bm(sliding_window_num_blocks // 2)
 
-    def forward(self, input_seq: Tensor, target_seq: Tensor, sliding_window_num_blocks: Tensor):
+    def forward(self, input_seq: Tensor, target_seq: Tensor = None, sliding_window_num_blocks: Tensor = None):
         assert input_seq.ndim == 1
 
         ve = [value_embed(input_seq) for value_embed in self.value_embeds]
         # Adjust token value embeddings structure for fewer layers
-        # Original: [ve[0], ve[1], ve[2]] + [None] * (len(self.blocks) - 6) + [ve[0], ve[1], ve[2]]
-        if len(self.blocks) == 6:  # For our reduced model size
-            ve = [ve[0], ve[1], ve[2], ve[0], ve[1], ve[2]]
-        else:
-            # Maintain original structure for other configurations
-            ve = [ve[0], ve[1], ve[2]] + [None] * (len(self.blocks) - 6) + [ve[0], ve[1], ve[2]]
+        ve = [ve[0], ve[1], ve[2]] + [None] * (len(self.blocks) - 6) + [ve[0], ve[1], ve[2]]
         assert len(ve) == len(self.blocks)
 
-        long_bm, short_bm = self.create_blockmasks(input_seq, sliding_window_num_blocks)
-        # Adjust block_masks for the number of layers we have
-        if len(self.blocks) == 6:  # For our reduced model size
-            block_masks = [long_bm, short_bm, short_bm, short_bm, short_bm, long_bm]
+        if target_seq is None:
+            def causal(b, h, q_idx, kv_idx):
+                return q_idx >= kv_idx
+            simple_mask = create_block_mask(causal, B=None, H=None, Q_LEN=input_seq.size(0), KV_LEN=input_seq.size(0))
+            # TODO look thru the long/short_bm to figure out if it actually makes sense to use a simple causal here
+            block_masks = [simple_mask] * len(self.blocks)
         else:
-            # Original: [long_bm, short_bm, short_bm, short_bm, long_bm, short_bm, short_bm, long_bm, short_bm, short_bm, short_bm, long_bm]
-            block_masks = [long_bm, short_bm] * (len(self.blocks) // 2)
-            # Ensure the first and last use long_bm
-            if len(block_masks) > 0:
-                block_masks[0] = long_bm
-                if len(block_masks) > 1:
-                    block_masks[-1] = long_bm
+            long_bm, short_bm = self.create_blockmasks(input_seq, sliding_window_num_blocks)
+            # Adjust block_masks for the number of layers we have
+            if len(self.blocks) == 6:  # For our reduced model size
+                block_masks = [long_bm, short_bm, short_bm, short_bm, short_bm, long_bm]
+            else:
+                # Original: [long_bm, short_bm, short_bm, short_bm, long_bm, short_bm, short_bm, long_bm, short_bm, short_bm, short_bm, long_bm]
+                block_masks = [long_bm, short_bm] * (len(self.blocks) // 2)
+                # Ensure the first and last use long_bm
+                if len(block_masks) > 0:
+                    block_masks[0] = long_bm
+                    if len(block_masks) > 1:
+                        block_masks[-1] = long_bm
         assert len(block_masks) == len(self.blocks)
 
         x = x0 = norm(self.embed(input_seq)[None]) # use of norm here by @Grad62304977
@@ -428,35 +432,52 @@ class GPT(nn.Module):
         logits = self.lm_head(x).float()
         # @Grad62304977 added tanh softcapping following Gemma 2 paper, @KoszarskyB reduced it from 30 to 15, @YouJiacheng shifted it by +15 (2*sigmoid(2*x)=tanh(x)+1)
         logits = 30 * torch.sigmoid(logits / (7.5 * x.size(-1)**0.5))
-        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), target_seq, reduction='sum' if self.training else 'mean')
-        return loss
+        
+        if target_seq is None:
+            return logits
+        else:
+            return F.cross_entropy(logits.view(-1, logits.size(-1)), target_seq, 
+                                  reduction='sum' if self.training else 'mean')
 
     @torch.no_grad()
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
         """
-        Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
+        Take a conditioning sequence of indices idx (LongTensor of shape (t)) and complete
         the sequence max_new_tokens times, feeding the predictions back into the model each time.
         Most likely you'll want to make sure to be in model.eval() mode of operation for this.
         """
+        assert idx.ndim == 1
+        def cdiv(m, n):
+            return (m + (n - 1)) // n
+        seq_len = idx.size(0)
+        if seq_len % 128 != 0:
+            pad_ct = cdiv(seq_len, 128) * 128 - seq_len
+            idx = torch.cat((idx, torch.zeros(pad_ct, dtype=idx.dtype, device=idx.device)), dim=0)
+        
+        self.eval()  # Ensure model is in evaluation mode
         for _ in range(max_new_tokens):
-            # if the sequence context is growing too long we must crop it at block_size
-            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
-            # forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx_cond)
-            # pluck the logits at the final step and scale by desired temperature
-            logits = logits[:, -1, :] / temperature
+            # Forward pass to get logits
+            logits = self(idx[-self.max_seq_len:] if idx.size(0) > self.max_seq_len else idx)
+            # Focus on the last token's prediction
+            logits = logits[0, min(seq_len, self.max_seq_len) - 1, :] / temperature
             # optionally crop the logits to only the top k options
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = -float('Inf')
+                logits[logits < v[-1]] = -float('Inf')
             # apply softmax to convert logits to (normalized) probabilities
             probs = F.softmax(logits, dim=-1)
             # sample from the distribution
             idx_next = torch.multinomial(probs, num_samples=1)
             # append sampled index to the running sequence and continue
-            idx = torch.cat((idx, idx_next), dim=1)
+            idx[min(seq_len, self.max_seq_len)] = idx_next
 
-        return idx
+            # iterate sequence count and account for any time we surpass flex-attention's block size
+            seq_len += 1
+            if (seq_len - 1) % 128 == 0:
+                pad_ct = cdiv(seq_len, 128) * 128 - seq_len
+                idx = torch.cat((idx, [0] * pad_ct), dim=0)
+
+        return idx[:seq_len]
 
 # -----------------------------------------------------------------------------
 # Our own simple Distributed Data Loader
@@ -505,13 +526,13 @@ class Hyperparameters:
     train_seq_len = 16*1024 # FlexAttention sequence length - reduced from 48*1024 for RTX 40 series w/ at least 8GB VRAM during testing
     val_seq_len = 16*1024 # FlexAttention sequence length for validation - reduced from 4*64*1024
     # optimization
-    num_iterations = 20 # number of iterations to run
+    num_iterations = 1000 # number of iterations to run
     cooldown_frac = 0.4 # fraction of training spent cooling down the learning rate
     # architecture
     vocab_size = 50257
     # model size - new parameters for RTX 40 series w/ at least 8GB VRAM during testing
-    num_layers = 6  # 124m param model should be 12
-    num_heads = 6   # 124m param model should be 6
+    num_layers = 12  # 124m param model should be 12
+    num_heads = 12   # 124m param model should be 6
     model_dim = 384  # must be divisible by num_heads
     head_dim = None  # if None, will be set to model_dim // num_heads
     mlp_ratio = 4  # 124m param model should be 4
@@ -526,13 +547,10 @@ class Hyperparameters:
         if self.head_dim is None:
             self.head_dim = self.model_dim // self.num_heads
         assert self.head_dim in [2 ** i for i in range(1, 10)], f"head_dim must be a power of 2, got {self.head_dim}"
-        
-        # Validate MLP ratio
         assert self.mlp_ratio > 0, f"mlp_ratio must be positive, got {self.mlp_ratio}"
-        
-        # Validate sequence lengths
         assert self.train_seq_len % 128 == 0, f"train_seq_len must be multiple of 128, got {self.train_seq_len}"
         assert self.val_seq_len % 128 == 0, f"val_seq_len must be multiple of 128, got {self.val_seq_len}"
+        assert self.num_layers >= 6, f"num_layers must be greater than 6 because of value embedding structure, got {self.num_layers}"
 
 args = Hyperparameters()
 
@@ -602,6 +620,7 @@ model: nn.Module = GPT(vocab_size=args.vocab_size,
                        model_dim=args.model_dim,
                        max_seq_len=max(args.train_seq_len, args.val_seq_len),
                        mlp_ratio=args.mlp_ratio).cuda()
+print0(model)
 
 # Set FP8 option based on hyperparameters
 model.lm_head.use_fp8 = args.use_fp8
@@ -690,6 +709,36 @@ if hasattr(torch.cuda, 'memory_stats'):
 ########################################
 #        Training and validation       #
 ########################################
+
+def sample_from_model(model, prompt, max_new_tokens=100, temperature=0.8, top_k=200):
+    """Generate text samples from the model given a prompt."""
+    # We need an encoding function - assuming you'll use tiktoken or similar
+    enc = tiktoken.get_encoding("gpt2")
+    encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
+    decode = lambda l: enc.decode(l)
+    
+    # Encode the prompt
+    input_ids = encode(prompt)
+    x = torch.tensor(input_ids, dtype=torch.int32, device="cuda")
+    
+    # Generate
+    model.eval()
+    with torch.no_grad():
+        y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
+    
+    # Decode and return
+    return decode(y.tolist())
+
+# check out what the randomly initialized model generates
+prompts = [
+    "Once upon a time,",
+    "The meaning of life is",
+    "In the year 2050,"
+]
+if master_process:
+    for prompt in prompts:
+        continuation = sample_from_model(model, prompt, max_new_tokens=16)
+        print0(continuation, console=True)
 
 # In the training section, add a warning if using single shard
 train_files = [Path(file) for file in sorted(glob.glob(args.train_files))]
@@ -782,3 +831,9 @@ for step in range(train_steps + 1):
 print0(f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB "
        f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB", console=True)
 dist.destroy_process_group()
+
+# Then at the end of training:
+if master_process:
+    for prompt in prompts:
+        continuation = sample_from_model(model, prompt, max_new_tokens=16)
+        print0(continuation, console=True)

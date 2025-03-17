@@ -8,7 +8,20 @@ thoughts:
 - some of the optimizations made here, while i believe they speed things up, create a lot of unnecessary complication when one might want to just edit off of a more traditional looking GPT
 - i think this is out of scope and i've not yet done the math to check, but i'm curious whether we can go slightly over the 124m size on an 8-GPU node, whether that be the recommended H100s newer blackwell chips once thsoe come out. if we're actually sticking to the 3.28 CEloss target then that'd still be reasonably cheap
 - we'd need to edit the code to a standardized number of tokens rather than shooting for that 3.28 CELoss target every time, especially if i'm gonna implement benchmarking script
-- 
+
+todos:
+- [x] integrate generate()
+    - [x] make forward() work w/ both inference & training
+    - [x] make inference causal mask next multiple of 128
+    - [ ] look thru the long/short_bm to figure out if it actually makes sense to use a simple causal mask (likely doesn't; prolly gonna have to switch to the training masks)
+    - [x] print example generations at end of training
+    - [x] write sample function
+- [ ] integrate hellaswag.py
+    - [ ] print score at end of training
+- [x] see if i can cleanup/remove all the cache clearing
+- [ ] integrate custom tokenizer option
+- [x] lower dataset download size for testing
+- [x] integrate mlp_ratio & improve hyperparameter config
 
 for two GPUs (testing):
 ```
