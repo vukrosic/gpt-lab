@@ -22,8 +22,8 @@ todos:
 - [x] confirm support for 2x 8GB vram GPUs
 - [x] switch dataset strings to support edu or non-edu fineweb without manually editing
 - [x] change multi-epoch warnign from single shard to dynamically know how many epochs are being run
-- [ ] integrate hellaswag.py
-    - [ ] print score at end of training
+- [x] integrate hellaswag.py
+    - [x] print score at end of training
 - [ ] look thru the long/short_bm to figure out if it actually makes sense to use a simple causal mask (likely doesn't; prolly gonna have to switch to the training masks)
 - [ ] switch from gpt2 tokenizer default to whatever newest tokenizer has easily available pre-tokenized fineweb data available for download
 - [ ] add custom tokenizer option through tiktoken
@@ -32,6 +32,7 @@ todos:
 - [ ] calc runtime of 10B? tokens on 8xH100
 - [ ] add pre-made model sizes designed for different common GPU node sizes configurable by input args
 - [ ] switch experiment history saving from single text file to folders w/ csv files for training data, model weights, etc
+- [ ] add batched inference (especially to make hellaswag eval faster)
 
 for two GPUs (testing):
 ```

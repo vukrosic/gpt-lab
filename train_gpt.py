@@ -11,6 +11,7 @@ from functools import lru_cache
 from pathlib import Path
 import itertools
 import tiktoken
+import json
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch
@@ -547,7 +548,7 @@ class Hyperparameters:
     train_seq_len = 16*1024 # FlexAttention sequence length - reduced from 48*1024 for GPUs w/ at least 8GB VRAM during testing
     val_seq_len = 16*1024 # FlexAttention sequence length for validation - reduced from 4*64*1024
     # optimization
-    num_iterations = 20 # number of iterations to run
+    num_iterations = 10 # number of iterations to run
     cooldown_frac = 0.4 # fraction of training spent cooling down the learning rate
     # architecture
     vocab_size = 50257
@@ -847,3 +848,138 @@ if master_process:
     for prompt in prompts:
         continuation = sample_from_model(model, prompt, max_new_tokens=16)
         print0(continuation, console=True)
+
+########################################
+#        HellaSwag Evaluation         #
+########################################
+
+def render_hellaswag_example(example, enc):
+    """
+    Given the example as a dictionary, render it as three torch tensors:
+    - tokens (the tokens of context + completion, of size 4xN, as there are always 4 candidates)
+    - mask (is 1 in the region of the candidate completion, where we evaluate likelihoods)
+    - label (the index of the correct completion, which we hope has the highest likelihood)
+    """
+    ctx = example["ctx"]
+    label = example["label"]
+    endings = example["endings"]
+
+    # gather up all the tokens
+    ctx_tokens = enc.encode(ctx)
+    tok_rows = []
+    mask_rows = []
+    for end in endings:
+        end_tokens = enc.encode(" " + end)  # note: prepending " " because GPT-2 tokenizer
+        tok_rows.append(ctx_tokens + end_tokens)
+        mask_rows.append([0]*len(ctx_tokens) + [1]*len(end_tokens))
+
+    # have to be careful during the collation because the number of tokens in each row can differ
+    max_len = max(len(row) for row in tok_rows)
+    tokens = torch.zeros((4, max_len), dtype=torch.int32)
+    mask = torch.zeros((4, max_len), dtype=torch.int32)
+    for i, (tok_row, mask_row) in enumerate(zip(tok_rows, mask_rows)):
+        tokens[i, :len(tok_row)] = torch.tensor(tok_row)
+        mask[i, :len(mask_row)] = torch.tensor(mask_row)
+
+    return tokens, mask, label
+
+def iterate_hellaswag_examples(data_path, limit=None):
+    """Iterate through HellaSwag examples, with optional limit"""
+    with open(data_path, "r") as f:
+        for i, line in enumerate(f):
+            if limit is not None and i >= limit:
+                break
+            example = json.loads(line)
+            yield example
+
+@torch.no_grad()
+def evaluate_hellaswag(model, data_path, limit=None):
+    """Evaluate model on HellaSwag"""
+    print0("Starting HellaSwag evaluation...", console=True)
+    
+    # Set up tokenizer
+    enc = tiktoken.get_encoding("gpt2")
+    
+    model.eval()
+    
+    num_correct_norm = 0
+    num_correct = 0
+    num_total = 0
+    
+    for example in iterate_hellaswag_examples(data_path, limit):
+        tokens, mask, label = render_hellaswag_example(example, enc)
+        tokens = tokens.to(device="cuda")
+        mask = mask.to(device="cuda")
+
+        # Process each candidate one at a time to avoid memory issues
+        losses = []
+        normalized_losses = []
+        
+        for i in range(4):  # 4 candidates per example
+            # Get token sequence for this candidate
+            seq = tokens[i]
+            seq_mask = mask[i]
+            
+            # Only process up to valid tokens (not padding)
+            valid_len = (seq > 0).sum().item()
+            if valid_len == 0:
+                continue
+                
+            valid_seq = seq[:valid_len]
+            
+            # Get logits from our model
+            logits = model(valid_seq)
+            if isinstance(logits, torch.Tensor):
+                logits = logits[0]  # Our model returns [B, T, V] but B=1
+            
+            # Evaluate the autoregressive loss
+            shift_logits = logits[:-1, :]
+            shift_tokens = valid_seq[1:].to(torch.int64)  # Target needs to be int64
+            shift_mask = seq_mask[1:valid_len]  # Shift mask to align with shifted tokens
+            
+            # Calculate loss for each position
+            losses_per_token = F.cross_entropy(
+                shift_logits, shift_tokens, reduction='none'
+            )
+            
+            # Apply mask to focus on completion region
+            masked_losses = losses_per_token * shift_mask
+            
+            # Calculate total and normalized loss
+            total_loss = masked_losses.sum()
+            completion_token_count = shift_mask.sum()
+            normalized_loss = total_loss / completion_token_count if completion_token_count > 0 else float('inf')
+            
+            losses.append(total_loss.item())
+            normalized_losses.append(normalized_loss.item())
+        
+        # Get predictions
+        pred = torch.tensor(losses).argmin().item()
+        pred_norm = torch.tensor(normalized_losses).argmin().item()
+        
+        # Accumulate stats
+        num_total += 1
+        num_correct += int(pred == label)
+        num_correct_norm += int(pred_norm == label)
+        
+        # Debug: pretty print a few examples
+        print0(f"Example {num_total} - acc: {num_correct}/{num_total}={num_correct/num_total:.4f}, "
+               f"acc_norm: {num_correct_norm}/{num_total}={num_correct_norm/num_total:.4f}", console=True)
+        
+        if num_total <= 3:  # Show details for first 3 examples
+            print0("---", console=True)
+            print0(f"Context:\n {example['ctx']}", console=True)
+            print0(f"Endings:", console=True)
+            for i, end in enumerate(example["endings"]):
+                print0(f"{i} (loss: {normalized_losses[i]:.4f}) {end}", console=True)
+            print0(f"predicted: {pred_norm}, actual: {label}", console=True)
+    
+    # Final results
+    print0(f"HellaSwag evaluation complete - {num_total} examples", console=True)
+    print0(f"Accuracy: {num_correct}/{num_total}={num_correct/num_total:.4f}", console=True)
+    print0(f"Normalized accuracy: {num_correct_norm}/{num_total}={num_correct_norm/num_total:.4f}", console=True)
+
+# After training and sample generations, evaluate on HellaSwag (limited to 10 examples)
+if master_process:
+    hellaswag_path = "./data/hellaswag/hellaswag_val.jsonl"  # Adjust path as needed
+    evaluate_hellaswag(model, hellaswag_path, limit=10)
