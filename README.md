@@ -16,12 +16,16 @@ todos:
     - [ ] look thru the long/short_bm to figure out if it actually makes sense to use a simple causal mask (likely doesn't; prolly gonna have to switch to the training masks)
     - [x] print example generations at end of training
     - [x] write sample function
-- [ ] integrate hellaswag.py
-    - [ ] print score at end of training
 - [x] see if i can cleanup/remove all the cache clearing
-- [ ] integrate custom tokenizer option
 - [x] lower dataset download size for testing
 - [x] integrate mlp_ratio & improve hyperparameter config
+- [ ] look thru the long/short_bm to figure out if it actually makes sense to use a simple causal mask (likely doesn't; prolly gonna have to switch to the training masks)
+- [ ] integrate hellaswag.py
+    - [ ] print score at end of training
+- [ ] add custom tokenizer option
+- [ ] rename to [[templateGPT]]?
+- [ ] test again on 8xH100
+- [ ] calc runtime of 10B tokens on 8xH100
 
 for two GPUs (testing):
 ```
