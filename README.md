@@ -19,6 +19,9 @@ todos:
 - [x] see if i can cleanup/remove all the cache clearing
 - [x] lower dataset download size for testing
 - [x] integrate mlp_ratio & improve hyperparameter config
+- [x] confirm support for 2x 8GB vram GPUs
+- [ ] switch dataset strings to support edu or non-edu fineweb without manually editing
+- [ ] change multi-epoch warnign from single shard to dynamically know how many epochs are being run
 - [ ] look thru the long/short_bm to figure out if it actually makes sense to use a simple causal mask (likely doesn't; prolly gonna have to switch to the training masks)
 - [ ] integrate hellaswag.py
     - [ ] print score at end of training

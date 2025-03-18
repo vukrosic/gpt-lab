@@ -520,19 +520,20 @@ def distributed_data_generator(filename_pattern: str, batch_size: int, rank : in
 @dataclass
 class Hyperparameters:
     # data
-    train_files = "data/fineweb10B/fineweb_train_*.bin" # input .bin to train on
-    val_files = "data/fineweb10B/fineweb_val_*.bin" # input .bin to eval validation loss on
+    train_files = "data/finewebedu10B/finewebedu_train_*.bin" # input .bin to train on
+    val_files = "data/finewebedu10B/finewebedu_val_*.bin" # input .bin to eval validation loss on
+        # ^ this needs to be changed to include or not include 'edu' depending on dataset you downloaded
     val_tokens = 10485760 # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
     train_seq_len = 16*1024 # FlexAttention sequence length - reduced from 48*1024 for RTX 40 series w/ at least 8GB VRAM during testing
     val_seq_len = 16*1024 # FlexAttention sequence length for validation - reduced from 4*64*1024
     # optimization
-    num_iterations = 1000 # number of iterations to run
+    num_iterations = 50 # number of iterations to run
     cooldown_frac = 0.4 # fraction of training spent cooling down the learning rate
     # architecture
     vocab_size = 50257
     # model size - new parameters for RTX 40 series w/ at least 8GB VRAM during testing
-    num_layers = 12  # 124m param model should be 12
-    num_heads = 12   # 124m param model should be 6
+    num_layers = 10  # 124m param model should be 12
+    num_heads = 6   # 124m param model should be 6
     model_dim = 384  # must be divisible by num_heads
     head_dim = None  # if None, will be set to model_dim // num_heads
     mlp_ratio = 4  # 124m param model should be 4
@@ -726,7 +727,8 @@ def sample_from_model(model, prompt, max_new_tokens=100, temperature=0.8, top_k=
 prompts = [
     "Once upon a time,",
     "The meaning of life is",
-    "In the year 2050,"
+    "In the year 2026,",
+    "I'm a Large Language Model (LLM), which means"
 ]
 if master_process:
     for prompt in prompts:
