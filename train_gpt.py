@@ -494,17 +494,38 @@ def _load_data_shard(file: Path):
         assert nbytes == 2 * num_tokens, "number of tokens read does not match header"
     return tokens
 
-def distributed_data_generator(filename_pattern: str, batch_size: int, rank : int, world_size : int):
+def distributed_data_generator(filename_pattern: str, batch_size: int, rank: int, world_size: int):
     files = [Path(file) for file in sorted(glob.glob(filename_pattern))]
     if not files:
         raise ValueError(f"No files found matching pattern: {filename_pattern}")
     
     assert batch_size % world_size == 0
     local_batch_size = batch_size // world_size
-    # Modify to handle single or multiple files
-    #file_iter = iter(files if len(files) > 1 else files * 100)  # Repeat single file if that's all we have
-    file_iter = iter(files) if len(files) > 1 else itertools.cycle(files) # i think cycle and *100 are equivalent but whatever
+    
+    # Calculate total tokens across all shards
+    total_tokens = 0
+    tokens_per_file = []
+    for file in files:
+        header = torch.from_file(str(file), False, 256, dtype=torch.int32)
+        file_tokens = int(header[2])
+        total_tokens += file_tokens
+        tokens_per_file.append(file_tokens)
+    
+    # Calculate how many tokens we need for training
+    tokens_needed = args.num_iterations * batch_size
+    
+    # Determine if we need to cycle and calculate epochs
+    will_cycle = total_tokens < tokens_needed
+    epochs = tokens_needed / total_tokens if total_tokens > 0 else 0
+    
+    if rank == 0:
+        print0(f"Total tokens across {len(files)} shard(s): {total_tokens:,}", console=True)
+        print0(f"Tokens needed for {args.num_iterations} iterations: {tokens_needed:,}", console=True)
+        print0(f"Training will use approximately {epochs:.2f} epochs over the data", console=True)
+    
+    file_iter = itertools.cycle(files) if will_cycle else iter(files)
     tokens, pos = _load_data_shard(next(file_iter)), 0
+    
     while True:
         if pos + batch_size + 1 >= len(tokens):
             tokens, pos = _load_data_shard(next(file_iter)), 0
@@ -526,7 +547,7 @@ class Hyperparameters:
     train_seq_len = 16*1024 # FlexAttention sequence length - reduced from 48*1024 for GPUs w/ at least 8GB VRAM during testing
     val_seq_len = 16*1024 # FlexAttention sequence length for validation - reduced from 4*64*1024
     # optimization
-    num_iterations = 10 # number of iterations to run
+    num_iterations = 20 # number of iterations to run
     cooldown_frac = 0.4 # fraction of training spent cooling down the learning rate
     # architecture
     vocab_size = 50257
@@ -733,11 +754,6 @@ if master_process:
     for prompt in prompts:
         continuation = sample_from_model(model, prompt, max_new_tokens=16)
         print0(continuation, console=True)
-
-# In the training section, add a warning if using single shard
-train_files = [Path(file) for file in sorted(glob.glob(args.train_files))]
-if master_process and len(train_files) == 1:
-    print0("WARNING: Training on single shard; will run multiple epochs. This should only be used for testing.", console=True)
 
 train_loader = distributed_data_generator(args.train_files, world_size * args.train_seq_len, rank, world_size)
 
