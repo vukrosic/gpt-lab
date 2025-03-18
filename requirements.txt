@@ -1,4 +1,8 @@
-numpy
-tqdm
-torch
-huggingface-hub
+datasets==3.4.1
+huggingface_hub==0.29.3
+numpy==2.2.4
+Requests==2.32.3
+tiktoken==0.9.0
+torch==2.5.1+cu124
+tqdm==4.66.5
+transformers==4.49.0
