@@ -524,20 +524,20 @@ class Hyperparameters:
     val_files = "data/finewebedu10B/finewebedu_val_*.bin" # input .bin to eval validation loss on
         # ^ this needs to be changed to include or not include 'edu' depending on dataset you downloaded
     val_tokens = 10485760 # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
-    train_seq_len = 16*1024 # FlexAttention sequence length - reduced from 48*1024 for RTX 40 series w/ at least 8GB VRAM during testing
+    train_seq_len = 16*1024 # FlexAttention sequence length - reduced from 48*1024 for GPUs w/ at least 8GB VRAM during testing
     val_seq_len = 16*1024 # FlexAttention sequence length for validation - reduced from 4*64*1024
     # optimization
     num_iterations = 50 # number of iterations to run
     cooldown_frac = 0.4 # fraction of training spent cooling down the learning rate
     # architecture
     vocab_size = 50257
-    # model size - new parameters for RTX 40 series w/ at least 8GB VRAM during testing
+    # model size - new parameters for GPUs w/ at least 8GB VRAM during testing
     num_layers = 10  # 124m param model should be 12
     num_heads = 6   # 124m param model should be 6
     model_dim = 384  # must be divisible by num_heads
     head_dim = None  # if None, will be set to model_dim // num_heads
     mlp_ratio = 4  # 124m param model should be 4
-    # memory optimization for RTX 40 series w/ at least 8GB VRAM during testing
+    # memory optimization for GPUs w/ at least 8GB VRAM during testing
     use_fp8 = False # Set to True on H100s and newer, False on older
     # evaluation and logging
     val_loss_every = 100 # every how many steps to evaluate val loss? 0 for only at the end
@@ -560,7 +560,7 @@ rank = int(os.environ["RANK"])
 world_size = int(os.environ["WORLD_SIZE"])
 # Remove assertion for 8xH100
 # assert world_size == 8 # this code is designed for 8xH100
-print(f"Running with {world_size} GPUs (designed originally for 8xH100, adapted to also support 2x RTX 40 series w/ at least 8GB VRAM during testing)")
+print(f"Running with {world_size} GPUs (designed originally for 8xH100, adapted to also support 2x GPUs w/ at least 8GB VRAM during testing)")
 assert torch.cuda.is_available()
 device = torch.device("cuda", int(os.environ["LOCAL_RANK"]))
 torch.cuda.set_device(device)
@@ -659,7 +659,7 @@ def get_window_size_blocks_helper(window_size: int):
 def get_window_size_blocks(step: int):
     x = step / args.num_iterations # progress in training
     assert 0 <= x <= 1
-    # Linearly increase the block-wise sliding window size over training 128 -> 896 (reduced for RTX 40 series w/ at least 8GB VRAM during testing)
+    # Linearly increase the block-wise sliding window size over training 128 -> 896 (reduced for GPUs w/ at least 8GB VRAM during testing)
     # increase by @fernbear.bsky.social; block-wise by @YouJiacheng
     window_size = next_multiple_of_n(768 * x, n=128)
     return get_window_size_blocks_helper(window_size)
@@ -758,7 +758,7 @@ for step in range(train_steps + 1):
         training_time_ms += 1000 * (time.perf_counter() - t0)
         model.eval()
         
-        # Use smaller val batch for RTX 40 series w/ at least 8GB VRAM during testing
+        # Use smaller val batch for GPUs w/ at least 8GB VRAM during testing
         val_batch_size = world_size * args.val_seq_len
         # Ensure we validate on enough tokens while keeping memory usage reasonable
         val_steps = max(1, min(16, args.val_tokens // val_batch_size))
