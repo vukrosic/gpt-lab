@@ -1,13 +1,11 @@
-I'm messing around with modded-nanoGPT to see if it'd be a good (cheap) base for experiments. Preferably I'd like to be able to test any new code on two 4060Ti's or similar and then have the same file run on 8xH100s when it's time to do an actual run.
+# NanoGPT-Lab (WIP)
+this repo is a massive overhaul of [Modded-NanoGPT](https://github.com/KellerJordan/modded-nanogpt) with the goal of being a base for cheap & easy LLM experiments up to (for now) 124m parameters. I overhauled the modded version rather than the original because the former is WAY faster, and therefore cheaper which makes it more accessible for amateur scientists.
 
-thoughts:
-- i'd have to put significant time into explaining a lot of this code
-- there's no inference function; this repo is literally designed for only training. luckily that's a relatively simple mostly copy & paste fix
-- the current code for downloading pre-tokenized-with-GPT2's-tokenizer fineweb data is definitely convenient. however if i wanted to create the option for custom tokenizers I'd have to pull the tokenizer out of fineweb.py and make sure it also gets printed in `records/`
-- i'd have to create some sort of benchmarking setup; i think karpathy's guide on building nanoGPT has one that's relatively easy to use
-- some of the optimizations made here, while i believe they speed things up, create a lot of unnecessary complication when one might want to just edit off of a more traditional looking GPT
-- i think this is out of scope and i've not yet done the math to check, but i'm curious whether we can go slightly over the 124m size on an 8-GPU node, whether that be the recommended H100s newer blackwell chips once thsoe come out. if we're actually sticking to the 3.28 CEloss target then that'd still be reasonably cheap
-- we'd need to edit the code to a standardized number of tokens rather than shooting for that 3.28 CELoss target every time, especially if i'm gonna implement benchmarking script
+to test this on two GPUs (requires at least 8GB of VRAM each):
+```
+torchrun --nproc_per_node=2 train_gpt.py
+```
+should also run on more GPUs per node but you'll want to change the hyperparameters to a bigger model & context length / batch size
 
 todos:
 - [x] integrate generate()
@@ -25,24 +23,18 @@ todos:
     - [x] print score at end of training
     - [x] confidence intervals
     - [x] cleanup
-    - [ ] parallelize
-- [ ] look thru the long/short_bm to figure out if it actually makes sense to use a simple causal mask (likely doesn't; prolly gonna have to switch to the training masks)
+- [x] rename to NanoGPT-Lab
+- [ ] distribute hellaswag benchmark
+- [ ] look thru the long/short_bm to figure out if it actually makes sense to use a simple causal mask during inference (likely doesn't; prolly gonna have to switch back to the training masks)
 - [ ] switch from gpt2 tokenizer default to whatever newest tokenizer has easily available pre-tokenized fineweb data available for download
-- [ ] add custom tokenizer option through tiktoken
-- [ ] rename to [[templateGPT]]?
-- [ ] test again on 8xH100
-- [ ] calc runtime of 10B? tokens on 8xH100 & therefore cost
+- [ ] add custom tokenizers option through tiktoken
+- [ ] test again on 8xH100 to confirm I didn't break anything
+- [ ] calc runtime of 10B? tokens on 8xH100 & therefore cost of doing research
 - [ ] add pre-made model sizes designed for different common GPU node sizes configurable by input args
-- [ ] switch experiment history saving from single text file to folders w/ csv files for training data, model weights, etc
 - [ ] add batched inference (especially to make hellaswag eval faster)
 - [ ] switch experiment output from single text file to folder with csv file of loss, model weights, etc
     - [ ] model weights should upload to huggingface or something and not the github repo. or maybe just don't bother saving them?
-- [ ] 
-
-for two GPUs (testing):
-```
-torchrun --nproc_per_node=2 train_gpt.py
-```
+- [ ] excessively comment all the Modded-NanoGPT specific architecture edits to explain what's happening
 
 # Modded-NanoGPT (ORIGINAL README)
 
