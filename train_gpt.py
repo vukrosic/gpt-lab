@@ -744,18 +744,6 @@ def sample_from_model(model, prompt, max_new_tokens=100, temperature=0.8, top_k=
     # Decode and return
     return decode(y.tolist())
 
-# check out what the randomly initialized model generates
-prompts = [
-    "Once upon a time,",
-    "The meaning of life is",
-    "In the year 2026,",
-    "I'm a Large Language Model (LLM), which means"
-]
-if master_process:
-    for prompt in prompts:
-        continuation = sample_from_model(model, prompt, max_new_tokens=16)
-        print0(continuation, console=True)
-
 train_loader = distributed_data_generator(args.train_files, world_size * args.train_seq_len, rank, world_size)
 
 training_time_ms = 0
@@ -845,6 +833,12 @@ dist.destroy_process_group()
 
 # Then at the end of training:
 if master_process:
+    prompts = [
+        "Once upon a time,",
+        "The meaning of life is",
+        "In the year 2026,",
+        "I'm a Large Language Model (LLM), which means"
+    ]
     for prompt in prompts:
         continuation = sample_from_model(model, prompt, max_new_tokens=16)
         print0(continuation, console=True)
@@ -896,6 +890,9 @@ def iterate_hellaswag_examples(data_path, limit=None):
 def evaluate_hellaswag(model, data_path, limit=None):
     """Evaluate model on HellaSwag"""
     print0("Starting HellaSwag evaluation...", console=True)
+    
+    # Add this line at the beginning of the function to disable dynamo compilation for evaluation
+    torch._dynamo.config.disable = True
     
     # Set up tokenizer
     enc = tiktoken.get_encoding("gpt2")
@@ -962,24 +959,51 @@ def evaluate_hellaswag(model, data_path, limit=None):
         num_correct += int(pred == label)
         num_correct_norm += int(pred_norm == label)
         
-        # Debug: pretty print a few examples
-        print0(f"Example {num_total} - acc: {num_correct}/{num_total}={num_correct/num_total:.4f}, "
-               f"acc_norm: {num_correct_norm}/{num_total}={num_correct_norm/num_total:.4f}", console=True)
-        
-        if num_total <= 3:  # Show details for first 3 examples
-            print0("---", console=True)
-            print0(f"Context:\n {example['ctx']}", console=True)
-            print0(f"Endings:", console=True)
+        if num_total <= 5:  # Show details for first few examples
+            print0(f"---\nContext:\n {example['ctx']}\nEndings:", console=True)
             for i, end in enumerate(example["endings"]):
                 print0(f"{i} (loss: {normalized_losses[i]:.4f}) {end}", console=True)
             print0(f"predicted: {pred_norm}, actual: {label}", console=True)
     
+    # Calculate accuracy
+    accuracy = num_correct / num_total if num_total > 0 else 0
+    accuracy_norm = num_correct_norm / num_total if num_total > 0 else 0
+    
+    # Calculate 95% confidence intervals using Wilson score interval
+    # This is more robust than normal approximation, especially for small sample sizes or extreme probabilities
+    z = 1.96  # 95% confidence
+    
+    def wilson_conf_interval(correct, total):
+        """Calculate Wilson score interval for a binary proportion"""
+        if total == 0:
+            return (0, 0)
+        
+        p = correct / total
+        denominator = 1 + z**2 / total
+        centre_adjusted_p = (p + z**2 / (2 * total)) / denominator
+        adjusted_interval = z * ((p * (1 - p) / total + z**2 / (4 * total**2)) ** 0.5) / denominator
+        
+        lower = max(0, centre_adjusted_p - adjusted_interval)
+        upper = min(1, centre_adjusted_p + adjusted_interval)
+        
+        return (lower, upper)
+    
+    # Get confidence intervals
+    ci = wilson_conf_interval(num_correct, num_total)
+    ci_norm = wilson_conf_interval(num_correct_norm, num_total)
+    
     # Final results
     print0(f"HellaSwag evaluation complete - {num_total} examples", console=True)
-    print0(f"Accuracy: {num_correct}/{num_total}={num_correct/num_total:.4f}", console=True)
-    print0(f"Normalized accuracy: {num_correct_norm}/{num_total}={num_correct_norm/num_total:.4f}", console=True)
+    print0(f"Accuracy: {num_correct}/{num_total}={accuracy:.4f} [95% CI: {ci[0]:.4f}-{ci[1]:.4f}]", console=True)
+    print0(f"Normalized accuracy: {num_correct_norm}/{num_total}={accuracy_norm:.4f} [95% CI: {ci_norm[0]:.4f}-{ci_norm[1]:.4f}]", console=True)
 
-# After training and sample generations, evaluate on HellaSwag (limited to 10 examples)
+# After training and sample generations, evaluate on HellaSwag
 if master_process:
     hellaswag_path = "./data/hellaswag/hellaswag_val.jsonl"  # Adjust path as needed
-    evaluate_hellaswag(model, hellaswag_path, limit=10)
+    
+    # Check if the HellaSwag data file exists
+    if os.path.exists(hellaswag_path):
+        print0(f"Found HellaSwag dataset at {hellaswag_path}, running evaluation...", console=True)
+        evaluate_hellaswag(model, hellaswag_path, limit=20)
+    else:
+        print0(f"HellaSwag dataset not found at {hellaswag_path}, skipping evaluation.", console=True)

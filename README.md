@@ -13,7 +13,6 @@ todos:
 - [x] integrate generate()
     - [x] make forward() work w/ both inference & training
     - [x] make inference causal mask next multiple of 128
-    - [ ] look thru the long/short_bm to figure out if it actually makes sense to use a simple causal mask (likely doesn't; prolly gonna have to switch to the training masks)
     - [x] print example generations at end of training
     - [x] write sample function
 - [x] see if i can cleanup/remove all the cache clearing
@@ -24,15 +23,21 @@ todos:
 - [x] change multi-epoch warnign from single shard to dynamically know how many epochs are being run
 - [x] integrate hellaswag.py
     - [x] print score at end of training
+    - [x] confidence intervals
+    - [x] cleanup
+    - [x] parallelize
 - [ ] look thru the long/short_bm to figure out if it actually makes sense to use a simple causal mask (likely doesn't; prolly gonna have to switch to the training masks)
 - [ ] switch from gpt2 tokenizer default to whatever newest tokenizer has easily available pre-tokenized fineweb data available for download
 - [ ] add custom tokenizer option through tiktoken
 - [ ] rename to [[templateGPT]]?
 - [ ] test again on 8xH100
-- [ ] calc runtime of 10B? tokens on 8xH100
+- [ ] calc runtime of 10B? tokens on 8xH100 & therefore cost
 - [ ] add pre-made model sizes designed for different common GPU node sizes configurable by input args
 - [ ] switch experiment history saving from single text file to folders w/ csv files for training data, model weights, etc
 - [ ] add batched inference (especially to make hellaswag eval faster)
+- [ ] switch experiment output from single text file to folder with csv file of loss, model weights, etc
+    - [ ] model weights should upload to huggingface or something and not the github repo. or maybe just don't bother saving them?
+- [ ] 
 
 for two GPUs (testing):
 ```
