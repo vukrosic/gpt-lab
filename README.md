@@ -25,7 +25,7 @@ todos:
     - [x] print score at end of training
     - [x] confidence intervals
     - [x] cleanup
-    - [x] parallelize
+    - [ ] parallelize
 - [ ] look thru the long/short_bm to figure out if it actually makes sense to use a simple causal mask (likely doesn't; prolly gonna have to switch to the training masks)
 - [ ] switch from gpt2 tokenizer default to whatever newest tokenizer has easily available pre-tokenized fineweb data available for download
 - [ ] add custom tokenizer option through tiktoken
