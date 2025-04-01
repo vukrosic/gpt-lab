@@ -779,7 +779,6 @@ for step in range(train_steps + 1):
         training_time_ms += 1000 * (time.perf_counter() - t0)
         model.eval()
         
-        # Use smaller val batch for GPUs w/ at least 8GB VRAM during testing
         val_batch_size = world_size * args.val_seq_len
         # Ensure we validate on enough tokens while keeping memory usage reasonable
         val_steps = max(1, min(16, args.val_tokens // val_batch_size))
@@ -893,45 +892,47 @@ def render_hellaswag_example(example, enc):
 
     return tokens, mask, label
 
-def iterate_hellaswag_examples(data_path, limit=None):
+def iterate_hellaswag_examples(data_path, limit=1014):
     """Iterate through HellaSwag examples, with optional limit"""
     with open(data_path, "r") as f:
         for i, line in enumerate(f):
-            if limit is not None and i >= limit:
+            if i >= limit:
                 break
             example = json.loads(line)
             yield example
 
 @torch.no_grad()
-def evaluate_hellaswag(model, data_path, limit=None):
-    """Evaluate model on HellaSwag"""
-    print0("Starting HellaSwag evaluation...", console=True)
-    
-    # Add this line at the beginning of the function to disable dynamo compilation for evaluation
+def evaluate_hellaswag(model, data_path, limit=1014):
+    """Evaluate model on HellaSwag in a distributed way using modulo distribution"""
+    assert limit <= 1014, f'there are only 1014 questions in the benchmark, but got limit={limit}'
     torch._dynamo.config.disable = True
-    
-    # Set up tokenizer
     enc = tiktoken.get_encoding("gpt2")
-    
     model.eval()
     
-    num_correct_norm = 0
-    num_correct = 0
-    num_total = 0
+    # Local counters
+    local_correct_norm = 0
+    local_correct = 0
+    local_total = 0
     
-    for example in iterate_hellaswag_examples(data_path, limit):
+    # Process examples that belong to this GPU (based on index % world_size)
+    for i, example in enumerate(iterate_hellaswag_examples(data_path, limit)):
+        # Skip examples that don't belong to this GPU
+        if i % world_size != rank:
+            continue
+
+        local_total += 1
         tokens, mask, label = render_hellaswag_example(example, enc)
         tokens = tokens.to(device="cuda")
         mask = mask.to(device="cuda")
 
-        # Process each candidate one at a time to avoid memory issues
+        # Process each candidate one at a time
         losses = []
         normalized_losses = []
         
-        for i in range(4):  # 4 candidates per example
+        for j in range(4):  # 4 candidates per example
             # Get token sequence for this candidate
-            seq = tokens[i]
-            seq_mask = mask[i]
+            seq = tokens[j]
+            seq_mask = mask[j]
             
             # Only process up to valid tokens (not padding)
             valid_len = (seq > 0).sum().item()
@@ -966,62 +967,65 @@ def evaluate_hellaswag(model, data_path, limit=None):
             losses.append(total_loss.item())
             normalized_losses.append(normalized_loss.item())
         
-        # Get predictions
+        # Get predictions and update counters
         pred = torch.tensor(losses).argmin().item()
         pred_norm = torch.tensor(normalized_losses).argmin().item()
         
-        # Accumulate stats
-        num_total += 1
-        num_correct += int(pred == label)
-        num_correct_norm += int(pred_norm == label)
+        local_correct += int(pred == label)
+        local_correct_norm += int(pred_norm == label)
+    
+    # Gather results from all processes
+    correct_tensor = torch.tensor([local_correct], dtype=torch.float32, device="cuda")
+    correct_norm_tensor = torch.tensor([local_correct_norm], dtype=torch.float32, device="cuda")
+    total_tensor = torch.tensor([local_total], dtype=torch.float32, device="cuda")
+    dist.all_reduce(correct_tensor, op=dist.ReduceOp.SUM)
+    dist.all_reduce(correct_norm_tensor, op=dist.ReduceOp.SUM)
+    dist.all_reduce(total_tensor, op=dist.ReduceOp.SUM)
+    
+    # Calculate final metrics on master process
+    if master_process:
+        num_correct = int(correct_tensor.item())
+        num_correct_norm = int(correct_norm_tensor.item())
+        num_total = int(total_tensor.item())
         
-        if num_total <= 5:  # Show details for first few examples
-            print0(f"---\nContext:\n {example['ctx']}\nEndings:", console=True)
-            for i, end in enumerate(example["endings"]):
-                print0(f"{i} (loss: {normalized_losses[i]:.4f}) {end}", console=True)
-            print0(f"predicted: {pred_norm}, actual: {label}", console=True)
-    
-    # Calculate accuracy
-    accuracy = num_correct / num_total if num_total > 0 else 0
-    accuracy_norm = num_correct_norm / num_total if num_total > 0 else 0
-    
-    # Calculate 95% confidence intervals using Wilson score interval
-    # This is more robust than normal approximation, especially for small sample sizes or extreme probabilities
-    z = 1.96  # 95% confidence
-    
-    def wilson_conf_interval(correct, total):
-        """Calculate Wilson score interval for a binary proportion"""
-        if total == 0:
-            return (0, 0)
+        # Calculate metrics and print results
+        accuracy = num_correct / num_total if num_total > 0 else 0
+        accuracy_norm = num_correct_norm / num_total if num_total > 0 else 0
+
+        # Calculate 95% confidence intervals using Wilson score interval
+        # This is more robust than normal approximation, especially for small sample sizes or extreme probabilities
+        z = 1.96  # 95% confidence
         
-        p = correct / total
-        denominator = 1 + z**2 / total
-        centre_adjusted_p = (p + z**2 / (2 * total)) / denominator
-        adjusted_interval = z * ((p * (1 - p) / total + z**2 / (4 * total**2)) ** 0.5) / denominator
+        def wilson_conf_interval(correct, total):
+            """Calculate Wilson score interval for a binary proportion"""
+            if total == 0:
+                return (0, 0)
+            
+            p = correct / total
+            denominator = 1 + z**2 / total
+            centre_adjusted_p = (p + z**2 / (2 * total)) / denominator
+            adjusted_interval = z * ((p * (1 - p) / total + z**2 / (4 * total**2)) ** 0.5) / denominator
+            
+            lower = max(0, centre_adjusted_p - adjusted_interval)
+            upper = min(1, centre_adjusted_p + adjusted_interval)
+            
+            return (lower, upper)
         
-        lower = max(0, centre_adjusted_p - adjusted_interval)
-        upper = min(1, centre_adjusted_p + adjusted_interval)
+        # Get confidence intervals
+        ci = wilson_conf_interval(num_correct, num_total)
+        ci_norm = wilson_conf_interval(num_correct_norm, num_total)
         
-        return (lower, upper)
-    
-    # Get confidence intervals
-    ci = wilson_conf_interval(num_correct, num_total)
-    ci_norm = wilson_conf_interval(num_correct_norm, num_total)
-    
-    # Final results
-    print0(f"HellaSwag evaluation complete - {num_total} examples", console=True)
-    print0(f"Accuracy: {num_correct}/{num_total}={accuracy:.4f} [95% CI: {ci[0]:.4f}-{ci[1]:.4f}]", console=True)
-    print0(f"Normalized accuracy: {num_correct_norm}/{num_total}={accuracy_norm:.4f} [95% CI: {ci_norm[0]:.4f}-{ci_norm[1]:.4f}]", console=True)
+        print0(f"HellaSwag evaluation complete - {num_total} examples", console=True)
+        print0(f"Accuracy: {num_correct}/{num_total}={accuracy:.4f} [95% CI: {ci[0]:.3f}-{ci[1]:.3f}]", console=True)
+        print0(f"Normalized accuracy: {num_correct_norm}/{num_total}={accuracy_norm:.4f} [95% CI: {ci_norm[0]:.3f}-{ci_norm[1]:.3f}]", console=True)
 
 # After training and sample generations, evaluate on HellaSwag
-if master_process:
-    hellaswag_path = "./data/hellaswag/hellaswag_val.jsonl" 
-    
-    # Check if the HellaSwag data file exists
-    if os.path.exists(hellaswag_path):
-        print0(f"Found HellaSwag dataset at {hellaswag_path}, running evaluation...", console=True)
-        evaluate_hellaswag(model, hellaswag_path, limit=20)
-    else:
-        print0(f"HellaSwag dataset not found at {hellaswag_path}, skipping evaluation.", console=True)
+hellaswag_path = "./data/hellaswag/hellaswag_val.jsonl" 
+# Check if the HellaSwag data file exists
+if os.path.exists(hellaswag_path):
+    print0(f"Found HellaSwag dataset at {hellaswag_path}", console=True)
+    evaluate_hellaswag(model, hellaswag_path, limit=1014)
+else:
+    print0(f"HellaSwag dataset not found at {hellaswag_path}, skipping evaluation.", console=True)
 
 dist.destroy_process_group()
