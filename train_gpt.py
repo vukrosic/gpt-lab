@@ -13,7 +13,6 @@ import itertools
 import tiktoken
 import json
 import datetime
-import tqdm
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch
@@ -358,12 +357,11 @@ class GPT(nn.Module):
             causal_mask = q_idx >= kv_idx
             document_mask = docs[q_idx] == docs[kv_idx]
             return causal_mask & document_mask
-
         def dense_to_ordered(dense_blockmask: Tensor):
             num_blocks = dense_blockmask.sum(dim=-1, dtype=torch.int32)
             indices = dense_blockmask.argsort(dim=-1, descending=False, stable=True).flip(-1).to(torch.int32)
             return num_blocks[None, None].contiguous(), indices[None, None].contiguous()
-
+        
         # manual block mask creation by @YouJiacheng
         assert len(input_seq) % BLOCK_SIZE == 0
         NUM_BLOCKS = len(input_seq) // BLOCK_SIZE
@@ -372,6 +370,10 @@ class GPT(nn.Module):
         causal_blockmask_all = block_idx[:, None] > block_idx
         docs_low = docs.view(-1, BLOCK_SIZE)[:, 0].contiguous()
         docs_high = docs.view(-1, BLOCK_SIZE)[:, -1].contiguous()
+
+        # for some reason script hangs here without a collective operation to ensure synchronizatoin
+        dist.barrier()
+
         document_blockmask_any = (docs_low[:, None] <= docs_high) & (docs_high[:, None] >= docs_low)
         document_blockmask_all = (docs_low[:, None] == docs_high) & (docs_high[:, None] == docs_low)
         blockmask_any = causal_blockmask_any & document_blockmask_any
@@ -435,7 +437,7 @@ class GPT(nn.Module):
         logits = self.lm_head(x).float()
         # @Grad62304977 added tanh softcapping following Gemma 2 paper, @KoszarskyB reduced it from 30 to 15, @YouJiacheng shifted it by +15 (2*sigmoid(2*x)=tanh(x)+1)
         logits = 30 * torch.sigmoid(logits / (7.5 * x.size(-1)**0.5))
-        
+
         if target_seq is None:
             return logits
         else:
@@ -555,7 +557,7 @@ class Hyperparameters:
     train_files = "data/fineweb*10B/fineweb*_train_*.bin" # input .bin to train on
     val_files = "data/fineweb*10B/fineweb*_val_*.bin" # input .bin to eval validation loss on
     val_tokens = 10485760 # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
-    train_seq_len = 16*1024 # FlexAttention sequence length - reduced from 48*1024 for GPUs w/ at least 8GB VRAM during testing
+    train_seq_len = 8*1024 # FlexAttention sequence length - reduced from 48*1024 for GPUs w/ at least 8GB VRAM during testing
     val_seq_len = 16*1024 # FlexAttention sequence length for validation - reduced from 4*64*1024
     # optimization
     num_iterations = 10 # number of iterations to run
@@ -563,7 +565,7 @@ class Hyperparameters:
     # architecture
     vocab_size = 50257
     # model size - new parameters for GPUs w/ at least 8GB VRAM during testing
-    num_layers = 10  # 124m param model should be 12
+    num_layers = 6  # 124m param model should be 12
     num_heads = 6   # 124m param model should be 6
     model_dim = 384  # must be divisible by num_heads
     head_dim = None  # if None, will be set to model_dim // num_heads
@@ -716,9 +718,11 @@ if hasattr(torch.cuda, 'memory_stats'):
 warmup_steps = 10
 initial_state = dict(model=copy.deepcopy(model.state_dict()),
                      optimizers=[copy.deepcopy(opt.state_dict()) for opt in optimizers]) # save the initial state
-for _ in tqdm.tqdm(range(warmup_steps)):
-    inputs = targets = torch.randint(0, args.vocab_size, size=(args.train_seq_len,), device="cuda")
-    model(inputs.to(torch.int32), targets, get_window_size_blocks(0)).backward()
+for _ in range(warmup_steps):
+    inputs = targets = torch.randint(0, args.vocab_size, size=(args.train_seq_len,), device="cuda", dtype=torch.int64)
+    window_size_blocks = get_window_size_blocks(0)
+    loss = model(inputs.to(torch.int32), targets, window_size_blocks)
+    loss.backward()
     for param in model.parameters():
         dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
     for opt in optimizers:
@@ -727,7 +731,7 @@ for _ in tqdm.tqdm(range(warmup_steps)):
 model.load_state_dict(initial_state["model"])
 for opt, opt_state in zip(optimizers, initial_state["optimizers"]):
     opt.load_state_dict(opt_state)
-del initial_state
+del initial_state # TODO optionally save initial state of model
 
 if hasattr(torch.cuda, 'memory_stats'):
     print0(f"After warmup GPU memory: {torch.cuda.memory_allocated() // (1024 * 1024)} MB")

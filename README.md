@@ -1,7 +1,7 @@
 # NanoGPT-Lab (WIP)
 this repo is a massive overhaul of [Modded-NanoGPT](https://github.com/KellerJordan/modded-nanogpt) with the goal of being a base for cheap & easy LLM experiments up to (for now) 124m parameters. I overhauled the modded version rather than the original because the former is WAY faster, and therefore cheaper which makes it more accessible for amateur scientists.
 
-to test this on two GPUs (requires at least 8GB of VRAM each):
+to test this on two GPUs (requires at least 8GB of VRAM each unless you mess with hyperparameters):
 ```
 torchrun --nproc_per_node=2 train_gpt.py
 ```
@@ -24,7 +24,7 @@ todos:
     - [x] confidence intervals
     - [x] cleanup
 - [x] rename to NanoGPT-Lab
-- [ ] fix issue getting stuck at warmup kernels
+- [x] fix issue getting stuck at warmup kernels
 - [ ] distribute hellaswag benchmark
 - [ ] look thru the long/short_bm to figure out if it actually makes sense to use a simple causal mask during inference (likely doesn't; prolly gonna have to switch back to the training masks)
 - [ ] switch from gpt2 tokenizer default to whatever newest tokenizer has easily available pre-tokenized fineweb data available for download
