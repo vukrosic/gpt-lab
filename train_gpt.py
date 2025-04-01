@@ -506,7 +506,7 @@ def _load_data_shard(file: Path):
         assert nbytes == 2 * num_tokens, "number of tokens read does not match header"
     return tokens
 
-def distributed_data_generator(filename_pattern: str, batch_size: int, rank: int, world_size: int):
+def distributed_data_generator(filename_pattern: str, batch_size: int, rank: int, world_size: int, print_stats=True):
     files = [Path(file) for file in sorted(glob.glob(filename_pattern))]
     if not files:
         raise ValueError(f"No files found matching pattern: {filename_pattern}")
@@ -530,7 +530,7 @@ def distributed_data_generator(filename_pattern: str, batch_size: int, rank: int
     will_cycle = total_tokens < tokens_needed
     epochs = tokens_needed / total_tokens if total_tokens > 0 else 0
     
-    if rank == 0:
+    if rank == 0 and print_stats:
         print0(f"Total tokens across {len(files)} shard(s): {total_tokens:,}", console=True)
         print0(f"Tokens needed for {args.num_iterations} iterations: {tokens_needed:,}", console=True)
         print0(f"Training will use approximately {epochs:.2f} epochs over the data", console=True)
@@ -560,7 +560,7 @@ class Hyperparameters:
     train_seq_len = 8*1024 # FlexAttention sequence length - reduced from 48*1024 for GPUs w/ at least 8GB VRAM during testing
     val_seq_len = 16*1024 # FlexAttention sequence length for validation - reduced from 4*64*1024
     # optimization
-    num_iterations = 10 # number of iterations to run
+    num_iterations = 20 # number of iterations to run
     cooldown_frac = 0.4 # fraction of training spent cooling down the learning rate
     # architecture
     vocab_size = 50257
@@ -573,7 +573,7 @@ class Hyperparameters:
     # memory optimization for GPUs w/ at least 8GB VRAM during testing
     use_fp8 = False # Set to True on H100s and newer, False on older
     # evaluation and logging
-    val_loss_every = 100 # every how many steps to evaluate val loss? 0 for only at the end
+    val_loss_every = 10 # every how many steps to evaluate val loss? 0 for only at the end
     save_checkpoint = False
 
     def __post_init__(self):
@@ -788,7 +788,7 @@ for step in range(train_steps + 1):
         print0(f"Validating on {val_tokens_used} tokens ({val_steps} steps with {val_batch_size} batch size)", console=True)
         
         # Choose between real data loader and synthetic data loader for validation
-        val_loader = distributed_data_generator(args.val_files, val_batch_size, rank, world_size)
+        val_loader = distributed_data_generator(args.val_files, val_batch_size, rank, world_size, print_stats=False)
         val_loss = 0
         with torch.no_grad():
             for i in range(val_steps):
