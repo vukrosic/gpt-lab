@@ -12,6 +12,8 @@ from pathlib import Path
 import itertools
 import tiktoken
 import json
+import datetime
+import tqdm
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch
@@ -440,6 +442,13 @@ class GPT(nn.Module):
             return F.cross_entropy(logits.view(-1, logits.size(-1)), target_seq, 
                                   reduction='sum' if self.training else 'mean')
 
+    def get_num_params(self):
+        """
+        Return the number of parameters in the model.
+        """
+        n_params = sum(p.numel() for p in self.parameters())
+        return n_params
+
     @torch.no_grad()
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
         """
@@ -541,6 +550,7 @@ def distributed_data_generator(filename_pattern: str, batch_size: int, rank: int
 
 @dataclass
 class Hyperparameters:
+    model_name = "moddedGPT"
     # data
     train_files = "data/fineweb*10B/fineweb*_train_*.bin" # input .bin to train on
     val_files = "data/fineweb*10B/fineweb*_val_*.bin" # input .bin to eval validation loss on
@@ -579,9 +589,7 @@ args = Hyperparameters()
 # torchrun sets these env variables
 rank = int(os.environ["RANK"])
 world_size = int(os.environ["WORLD_SIZE"])
-# Remove assertion for 8xH100
-# assert world_size == 8 # this code is designed for 8xH100
-print(f"Running with {world_size} GPUs (designed originally for 8xH100, adapted to also support 2x GPUs w/ at least 8GB VRAM during testing)")
+print(f"Running with {world_size} GPUs (min 2, max 8)")
 assert torch.cuda.is_available()
 device = torch.device("cuda", int(os.environ["LOCAL_RANK"]))
 torch.cuda.set_device(device)
@@ -592,9 +600,9 @@ master_process = (rank == 0) # this process will do logging, checkpointing etc.
 # begin logging
 logfile = None
 if master_process:
-    run_id = uuid.uuid4()
-    os.makedirs("experiments", exist_ok=True)  # Changed from "logs" to "experiments"
-    logfile = f"experiments/{run_id}.txt"  # Changed from "logs/" to "experiments/"
+    start_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    logfile = f"experiments/{start_time}_{args.model_name}_D={args.model_dim}_L={args.num_layers}_H={args.num_heads}.txt"
+    os.makedirs("experiments", exist_ok=True)
     print(logfile)
 def print0(s, console=False):
     if master_process:
@@ -635,6 +643,7 @@ model: nn.Module = GPT(vocab_size=args.vocab_size,
                        model_dim=args.model_dim,
                        max_seq_len=max(args.train_seq_len, args.val_seq_len),
                        mlp_ratio=args.mlp_ratio).cuda()
+print0(f'{model.get_num_params()} parameters', console=True)
 print0(model)
 
 # Set FP8 option based on hyperparameters
@@ -697,6 +706,8 @@ torch._dynamo.config.suppress_errors = True
 #            Warmup kernels            #
 ########################################
 
+print0("warming up kernels...", console=True)
+
 # Attempt to limit memory fragmentation
 if hasattr(torch.cuda, 'memory_stats'):
     print0(f"Initial GPU memory: {torch.cuda.memory_allocated() // (1024 * 1024)} MB")
@@ -705,7 +716,7 @@ if hasattr(torch.cuda, 'memory_stats'):
 warmup_steps = 10
 initial_state = dict(model=copy.deepcopy(model.state_dict()),
                      optimizers=[copy.deepcopy(opt.state_dict()) for opt in optimizers]) # save the initial state
-for _ in range(warmup_steps):
+for _ in tqdm.tqdm(range(warmup_steps)):
     inputs = targets = torch.randint(0, args.vocab_size, size=(args.train_seq_len,), device="cuda")
     model(inputs.to(torch.int32), targets, get_window_size_blocks(0)).backward()
     for param in model.parameters():
@@ -720,6 +731,8 @@ del initial_state
 
 if hasattr(torch.cuda, 'memory_stats'):
     print0(f"After warmup GPU memory: {torch.cuda.memory_allocated() // (1024 * 1024)} MB")
+
+print0("kernels are toasty", console=True)
 
 ########################################
 #        Training and validation       #
@@ -768,7 +781,7 @@ for step in range(train_steps + 1):
         val_steps = max(1, min(16, args.val_tokens // val_batch_size))
         val_tokens_used = val_batch_size * val_steps
         
-        print0(f"Validating on {val_tokens_used} tokens ({val_steps} steps with {val_batch_size} batch size)")
+        print0(f"Validating on {val_tokens_used} tokens ({val_steps} steps with {val_batch_size} batch size)", console=True)
         
         # Choose between real data loader and synthetic data loader for validation
         val_loader = distributed_data_generator(args.val_files, val_batch_size, rank, world_size)
@@ -794,8 +807,8 @@ for step in range(train_steps + 1):
     if last_step:
         if master_process and args.save_checkpoint:
             log = dict(step=step, code=code, model=model.state_dict(), optimizers=[opt.state_dict() for opt in optimizers])
-            os.makedirs(f"experiments/{run_id}", exist_ok=True) # Changed from "logs/" to "experiments/"
-            torch.save(log, f"experiments/{run_id}/state_step{step:06d}.pt") # Changed from "logs/" to "experiments/"
+            os.makedirs(f"experiments/{start_time}", exist_ok=True) 
+            torch.save(log, f"experiments/{start_time}/state_step{step:06d}.pt") 
         # the last step only has the validation loop, so break to avoid training
         break
 
@@ -829,7 +842,6 @@ for step in range(train_steps + 1):
 
 print0(f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB "
        f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB", console=True)
-dist.destroy_process_group()
 
 # Then at the end of training:
 if master_process:
@@ -999,7 +1011,7 @@ def evaluate_hellaswag(model, data_path, limit=None):
 
 # After training and sample generations, evaluate on HellaSwag
 if master_process:
-    hellaswag_path = "./data/hellaswag/hellaswag_val.jsonl"  # Adjust path as needed
+    hellaswag_path = "./data/hellaswag/hellaswag_val.jsonl" 
     
     # Check if the HellaSwag data file exists
     if os.path.exists(hellaswag_path):
@@ -1007,3 +1019,5 @@ if master_process:
         evaluate_hellaswag(model, hellaswag_path, limit=20)
     else:
         print0(f"HellaSwag dataset not found at {hellaswag_path}, skipping evaluation.", console=True)
+
+dist.destroy_process_group()
