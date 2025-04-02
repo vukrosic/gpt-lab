@@ -334,6 +334,7 @@ def next_multiple_of_n(v: float | int, *, n: int):
 class GPT(nn.Module):
     def __init__(self, vocab_size: int, num_layers: int, num_heads: int, model_dim: int, max_seq_len: int, mlp_ratio: int):
         super().__init__()
+        self.model_dim = model_dim
         self.max_seq_len = max_seq_len
         self.embed = nn.Embedding(vocab_size, model_dim)
         # token value embeddings by @KoszarskyB - inspired by @Grad62304977's value residual implementation following https://arxiv.org/abs/2410.17897
@@ -352,7 +353,6 @@ class GPT(nn.Module):
     def create_blockmasks(self, input_seq: Tensor, sliding_window_num_blocks: Tensor):
         BLOCK_SIZE = 128
         docs = (input_seq == 50256).cumsum(0)
-
         def document_causal(b, h, q_idx, kv_idx):
             causal_mask = q_idx >= kv_idx
             document_mask = docs[q_idx] == docs[kv_idx]
@@ -393,6 +393,7 @@ class GPT(nn.Module):
         return build_bm(sliding_window_num_blocks), build_bm(sliding_window_num_blocks // 2)
 
     def forward(self, input_seq: Tensor, target_seq: Tensor = None, sliding_window_num_blocks: Tensor = None):
+        # sliding_window_num_blocks is tensor of shape (w) dtype int32 were w is number of blocks flexattention will use
         assert input_seq.ndim == 1
 
         ve = [value_embed(input_seq) for value_embed in self.value_embeds]
@@ -400,25 +401,15 @@ class GPT(nn.Module):
         ve = [ve[0], ve[1], ve[2]] + [None] * (len(self.blocks) - 6) + [ve[0], ve[1], ve[2]]
         assert len(ve) == len(self.blocks)
 
-        if target_seq is None:
-            def causal(b, h, q_idx, kv_idx):
-                return q_idx >= kv_idx
-            simple_mask = create_block_mask(causal, B=None, H=None, Q_LEN=input_seq.size(0), KV_LEN=input_seq.size(0))
-            # TODO look thru the long/short_bm to figure out if it actually makes sense to use a simple causal here
-            block_masks = [simple_mask] * len(self.blocks)
-        else:
-            long_bm, short_bm = self.create_blockmasks(input_seq, sliding_window_num_blocks)
-            # Adjust block_masks for the number of layers we have
-            if len(self.blocks) == 6:  # For our reduced model size
-                block_masks = [long_bm, short_bm, short_bm, short_bm, short_bm, long_bm]
-            else:
-                # Original: [long_bm, short_bm, short_bm, short_bm, long_bm, short_bm, short_bm, long_bm, short_bm, short_bm, short_bm, long_bm]
-                block_masks = [long_bm, short_bm] * (len(self.blocks) // 2)
-                # Ensure the first and last use long_bm
-                if len(block_masks) > 0:
-                    block_masks[0] = long_bm
-                    if len(block_masks) > 1:
-                        block_masks[-1] = long_bm
+        if sliding_window_num_blocks is None:
+            sliding_window_num_blocks = torch.tensor(
+                next_multiple_of_n(self.model_dim, n=128) // 128, 
+                dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        long_bm, short_bm = self.create_blockmasks(input_seq, sliding_window_num_blocks)
+        # Adjust block_masks for the number of layers we have
+        # Original: [long_bm, short_bm, short_bm, short_bm, long_bm, short_bm, short_bm, long_bm, short_bm, short_bm, short_bm, long_bm]
+        # TODO make a more interesting dynamic layout for block masks more resembling the original at any length
+        block_masks = [long_bm] + ([short_bm] * (len(self.blocks) - 2)) + [long_bm]
         assert len(block_masks) == len(self.blocks)
 
         x = x0 = norm(self.embed(input_seq)[None]) # use of norm here by @Grad62304977
@@ -577,14 +568,16 @@ class Hyperparameters:
     save_checkpoint = False
 
     def __post_init__(self):
-        # Validate and set derived parameters
+        # Validate and set derived param eters
         if self.head_dim is None:
             self.head_dim = self.model_dim // self.num_heads
         assert self.head_dim in [2 ** i for i in range(1, 10)], f"head_dim must be a power of 2, got {self.head_dim}"
         assert self.mlp_ratio > 0, f"mlp_ratio must be positive, got {self.mlp_ratio}"
         assert self.train_seq_len % 128 == 0, f"train_seq_len must be multiple of 128, got {self.train_seq_len}"
         assert self.val_seq_len % 128 == 0, f"val_seq_len must be multiple of 128, got {self.val_seq_len}"
-        assert self.num_layers >= 6, f"num_layers must be greater than 6 because of value embedding structure, got {self.num_layers}"
+        assert self.num_layers >= 2, f"num_layers must be greater than or equal to 2 because of attention mask structure, got {self.num_layers}"
+        assert self.num_layers >= 6, f"num_layers must be greater than or equal to 2 because of value embeddings structure, got {self.num_layers}"
+            # TODO adjust value embeddings to be more dynamic later
 
 args = Hyperparameters()
 
@@ -688,12 +681,11 @@ def get_lr(step: int):
 @lru_cache(1)
 def get_window_size_blocks_helper(window_size: int):
     return torch.tensor(window_size // 128, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-def get_window_size_blocks(step: int):
-    x = step / args.num_iterations # progress in training
+def get_window_size_blocks(step: int = None):
+    x = 1 if step is None else step / args.num_iterations # progress in training
     assert 0 <= x <= 1
-    # Linearly increase the block-wise sliding window size over training 128 -> 896 (reduced for GPUs w/ at least 8GB VRAM during testing)
-    # increase by @fernbear.bsky.social; block-wise by @YouJiacheng
-    window_size = next_multiple_of_n(768 * x, n=128)
+    # Linearly increase the block-wise sliding window size over training
+    window_size = next_multiple_of_n(args.model_dim * x, n=128)
     return get_window_size_blocks_helper(window_size)
 
 # Use a more memory-efficient compilation option
@@ -941,14 +933,29 @@ def evaluate_hellaswag(model, data_path, limit=1014):
                 
             valid_seq = seq[:valid_len]
             
+            # Pad sequence to multiple of 128 for FlexAttention
+            if valid_len % 128 != 0:
+                # Calculate padding needed
+                def cdiv(m, n):
+                    return (m + (n - 1)) // n
+                pad_ct = cdiv(valid_len, 128) * 128 - valid_len
+                # Add padding
+                valid_seq = torch.cat((valid_seq, 
+                                      torch.zeros(pad_ct, dtype=valid_seq.dtype, device=valid_seq.device)), 
+                                      dim=0)
+            
             # Get logits from our model
             logits = model(valid_seq)
             if isinstance(logits, torch.Tensor):
                 logits = logits[0]  # Our model returns [B, T, V] but B=1
             
+            # We only care about the original non-padded part
+            logits = logits[:valid_len]
+            
             # Evaluate the autoregressive loss
             shift_logits = logits[:-1, :]
-            shift_tokens = valid_seq[1:].to(torch.int64)  # Target needs to be int64
+            #shift_tokens = valid_seq[1:].to(torch.int64)  # Target needs to be int64
+            shift_tokens = seq[1:valid_len].to(torch.int64)  # Target needs to be int64
             shift_mask = seq_mask[1:valid_len]  # Shift mask to align with shifted tokens
             
             # Calculate loss for each position
@@ -1024,7 +1031,7 @@ hellaswag_path = "./data/hellaswag/hellaswag_val.jsonl"
 # Check if the HellaSwag data file exists
 if os.path.exists(hellaswag_path):
     print0(f"Found HellaSwag dataset at {hellaswag_path}", console=True)
-    evaluate_hellaswag(model, hellaswag_path, limit=1014)
+    evaluate_hellaswag(model, hellaswag_path, limit=20)#1014)
 else:
     print0(f"HellaSwag dataset not found at {hellaswag_path}, skipping evaluation.", console=True)
 
