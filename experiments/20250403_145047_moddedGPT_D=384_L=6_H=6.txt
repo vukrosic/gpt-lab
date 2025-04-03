@@ -392,14 +392,11 @@ class GPT(nn.Module):
         # Long-short SWA block masks by @leloykun & @YouJiacheng, adapated from suggestion by @Grad62304977, following Gemma 2 paper
         return build_bm(sliding_window_num_blocks), build_bm(sliding_window_num_blocks // 2)
 
-    def forward(self, 
-                input_seq: Tensor, # shape (B*N)
-                target_seq: Tensor = None, # (B*N)
-                sliding_window_num_blocks: Tensor = None):
+    def forward(self, input_seq: Tensor, target_seq: Tensor = None, sliding_window_num_blocks: Tensor = None):
         # sliding_window_num_blocks is tensor of shape (w) dtype int32 were w is number of blocks flexattention will use
         assert input_seq.ndim == 1
 
-        ve = [value_embed(input_seq) for value_embed in self.value_embeds] # each (B*N, D)
+        ve = [value_embed(input_seq) for value_embed in self.value_embeds]
         # Adjust token value embeddings structure for fewer layers
         ve = [ve[0], ve[1], ve[2]] + [None] * (len(self.blocks) - 6) + [ve[0], ve[1], ve[2]]
         assert len(ve) == len(self.blocks)
@@ -681,7 +678,7 @@ def get_lr(step: int):
         return w * 1.0 + (1 - w) * 0.1
 
 # attention window size schedule: linearly increase
-@lru_cache(1) # lru_cache memorizes output of this function rather than re-create tensor every time
+@lru_cache(1)
 def get_window_size_blocks_helper(window_size: int):
     return torch.tensor(window_size // 128, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
 def get_window_size_blocks(step: int = None):
@@ -747,7 +744,7 @@ def sample_from_model(model, prompt, max_new_tokens=100, temperature=0.8, top_k=
     # Encode the prompt
     input_ids = encode(prompt)
     x = torch.tensor(input_ids, dtype=torch.int32, device="cuda")
-    print0(f'sample_from_model input_ids.shape {x.shape}')
+    
     # Generate
     model.eval()
     with torch.no_grad():
@@ -842,18 +839,16 @@ print0(f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 10
        f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB", console=True)
 
 # Then at the end of training:
-#if master_process: 
-# by allowing them both to do it but only printing from master we avoid messing with dist.barrier() in mask creation
-# TODO figure out how to remove dist.barrier from block mask creation
-prompts = [
-    "Once upon a time,",
-    "The meaning of life is",
-    "In the year 2026,",
-    "I'm a Large Language Model (LLM), which means"
-]
-for prompt in prompts:
-    continuation = sample_from_model(model, prompt, max_new_tokens=16)
-    print0(continuation, console=True)
+if master_process:
+    prompts = [
+        "Once upon a time,",
+        "The meaning of life is",
+        "In the year 2026,",
+        "I'm a Large Language Model (LLM), which means"
+    ]
+    for prompt in prompts:
+        continuation = sample_from_model(model, prompt, max_new_tokens=16)
+        print0(continuation, console=True)
 
 ########################################
 #        HellaSwag Evaluation         #
@@ -1041,3 +1036,61 @@ else:
     print0(f"HellaSwag dataset not found at {hellaswag_path}, skipping evaluation.", console=True)
 
 dist.destroy_process_group()
+
+
+====================================================================================================
+hellaswag.py not found
+====================================================================================================
+====================================================================================================
+Running Python 3.11.10 | packaged by conda-forge | (main, Oct 16 2024, 01:27:36) [GCC 13.3.0]
+Running PyTorch 2.6.0+cu124 compiled for CUDA 12.4
+Thu Apr  3 14:50:47 2025       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 560.35.03              Driver Version: 560.35.03      CUDA Version: 12.6     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070        On  |   00000000:03:00.0 Off |                  N/A |
+| 60%   39C    P0             48W /  220W |     471MiB /   8192MiB |      4%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+|   1  NVIDIA GeForce RTX 3070        On  |   00000000:04:00.0 Off |                  N/A |
+| 40%   31C    P0             27W /  220W |     286MiB /   8192MiB |      6%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI        PID   Type   Process name                              GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
++-----------------------------------------------------------------------------------------+
+
+====================================================================================================
+107128347 parameters
+GPT(
+  (embed): Embedding(50257, 384)
+  (value_embeds): ModuleList(
+    (0-2): 3 x Embedding(50257, 384)
+  )
+  (blocks): ModuleList(
+    (0-5): 6 x Block(
+      (attn): CausalSelfAttention(
+        (rotary): Rotary()
+        (c_proj): CastedLinear(in_features=384, out_features=384, bias=False)
+      )
+      (mlp): MLP(
+        (c_fc): CastedLinear(in_features=384, out_features=1536, bias=False)
+        (c_proj): CastedLinear(in_features=1536, out_features=384, bias=False)
+      )
+    )
+  )
+  (lm_head): CastedLinear(in_features=384, out_features=50304, bias=False)
+)
+warming up kernels...
+Initial GPU memory: 289 MB
+After warmup GPU memory: 304 MB
+kernels are toasty
+Validating on 524288 tokens (16 steps with 32768 batch size)

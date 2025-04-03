@@ -398,8 +398,9 @@ class GPT(nn.Module):
                 sliding_window_num_blocks: Tensor = None):
         # sliding_window_num_blocks is tensor of shape (w) dtype int32 were w is number of blocks flexattention will use
         assert input_seq.ndim == 1
+        print(f'1, {input_seq.shape}, {target_seq.shape}\n{sliding_window_num_blocks}')
 
-        ve = [value_embed(input_seq) for value_embed in self.value_embeds] # each (B*N, D)
+        ve = [value_embed(input_seq) for value_embed in self.value_embeds]
         # Adjust token value embeddings structure for fewer layers
         ve = [ve[0], ve[1], ve[2]] + [None] * (len(self.blocks) - 6) + [ve[0], ve[1], ve[2]]
         assert len(ve) == len(self.blocks)
@@ -1041,3 +1042,91 @@ else:
     print0(f"HellaSwag dataset not found at {hellaswag_path}, skipping evaluation.", console=True)
 
 dist.destroy_process_group()
+
+
+====================================================================================================
+hellaswag.py not found
+====================================================================================================
+====================================================================================================
+Running Python 3.11.10 | packaged by conda-forge | (main, Oct 16 2024, 01:27:36) [GCC 13.3.0]
+Running PyTorch 2.6.0+cu124 compiled for CUDA 12.4
+Thu Apr  3 15:54:49 2025       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 560.35.03              Driver Version: 560.35.03      CUDA Version: 12.6     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070        On  |   00000000:03:00.0 Off |                  N/A |
+| 60%   38C    P0             22W /  220W |     326MiB /   8192MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+|   1  NVIDIA GeForce RTX 3070        On  |   00000000:04:00.0 Off |                  N/A |
+| 40%   29C    P8             16W /  220W |       4MiB /   8192MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI        PID   Type   Process name                              GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
++-----------------------------------------------------------------------------------------+
+
+====================================================================================================
+107128347 parameters
+GPT(
+  (embed): Embedding(50257, 384)
+  (value_embeds): ModuleList(
+    (0-2): 3 x Embedding(50257, 384)
+  )
+  (blocks): ModuleList(
+    (0-5): 6 x Block(
+      (attn): CausalSelfAttention(
+        (rotary): Rotary()
+        (c_proj): CastedLinear(in_features=384, out_features=384, bias=False)
+      )
+      (mlp): MLP(
+        (c_fc): CastedLinear(in_features=384, out_features=1536, bias=False)
+        (c_proj): CastedLinear(in_features=1536, out_features=384, bias=False)
+      )
+    )
+  )
+  (lm_head): CastedLinear(in_features=384, out_features=50304, bias=False)
+)
+warming up kernels...
+Initial GPU memory: 287 MB
+After warmup GPU memory: 299 MB
+kernels are toasty
+Validating on 262144 tokens (16 steps with 16384 batch size)
+step:0/20 val_loss:10.8258 train_time:0ms step_avg:0.07ms
+Total tokens across 1 shard(s): 100,000,000
+Tokens needed for 20 iterations: 163,840
+Training will use approximately 0.00 epochs over the data
+step:1/20 train_time:11491ms step_avg:11491.15ms
+step:2/20 train_time:11561ms step_avg:5780.63ms
+step:3/20 train_time:11640ms step_avg:3879.85ms
+step:4/20 train_time:11718ms step_avg:2929.51ms
+step:5/20 train_time:11797ms step_avg:2359.34ms
+step:6/20 train_time:11876ms step_avg:1979.29ms
+step:7/20 train_time:11955ms step_avg:1707.82ms
+step:8/20 train_time:12034ms step_avg:1504.24ms
+step:9/20 train_time:12101ms step_avg:1344.61ms
+step:10/20 train_time:12179ms step_avg:1217.94ms
+Validating on 262144 tokens (16 steps with 16384 batch size)
+step:10/20 val_loss:7.7784 train_time:12203ms step_avg:1220.34ms
+step:11/20 train_time:12259ms step_avg:1114.41ms
+step:12/20 train_time:12338ms step_avg:1028.18ms
+step:13/20 train_time:12416ms step_avg:955.08ms
+step:14/20 train_time:12494ms step_avg:892.46ms
+step:15/20 train_time:12572ms step_avg:838.17ms
+step:16/20 train_time:12651ms step_avg:790.71ms
+step:17/20 train_time:12730ms step_avg:748.85ms
+step:18/20 train_time:12809ms step_avg:711.62ms
+step:19/20 train_time:12888ms step_avg:678.31ms
+step:20/20 train_time:12967ms step_avg:648.34ms
+Validating on 262144 tokens (16 steps with 16384 batch size)
+step:20/20 val_loss:7.2537 train_time:12991ms step_avg:649.55ms
+peak memory allocated: 3411 MiB reserved: 3478 MiB
+sample_from_model input_ids.shape torch.Size([5])

@@ -372,7 +372,7 @@ class GPT(nn.Module):
         docs_high = docs.view(-1, BLOCK_SIZE)[:, -1].contiguous()
 
         # for some reason script hangs here without a collective operation to ensure synchronizatoin
-        dist.barrier()
+        #dist.barrier()
 
         document_blockmask_any = (docs_low[:, None] <= docs_high) & (docs_high[:, None] >= docs_low)
         document_blockmask_all = (docs_low[:, None] == docs_high) & (docs_high[:, None] == docs_low)
@@ -1041,3 +1041,58 @@ else:
     print0(f"HellaSwag dataset not found at {hellaswag_path}, skipping evaluation.", console=True)
 
 dist.destroy_process_group()
+
+
+====================================================================================================
+hellaswag.py not found
+====================================================================================================
+====================================================================================================
+Running Python 3.11.10 | packaged by conda-forge | (main, Oct 16 2024, 01:27:36) [GCC 13.3.0]
+Running PyTorch 2.6.0+cu124 compiled for CUDA 12.4
+Thu Apr  3 16:09:40 2025       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 560.35.03              Driver Version: 560.35.03      CUDA Version: 12.6     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070        On  |   00000000:03:00.0 Off |                  N/A |
+| 60%   38C    P0             44W /  220W |     326MiB /   8192MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+|   1  NVIDIA GeForce RTX 3070        On  |   00000000:04:00.0 Off |                  N/A |
+| 40%   29C    P8             16W /  220W |       4MiB /   8192MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI        PID   Type   Process name                              GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
++-----------------------------------------------------------------------------------------+
+
+====================================================================================================
+107128347 parameters
+GPT(
+  (embed): Embedding(50257, 384)
+  (value_embeds): ModuleList(
+    (0-2): 3 x Embedding(50257, 384)
+  )
+  (blocks): ModuleList(
+    (0-5): 6 x Block(
+      (attn): CausalSelfAttention(
+        (rotary): Rotary()
+        (c_proj): CastedLinear(in_features=384, out_features=384, bias=False)
+      )
+      (mlp): MLP(
+        (c_fc): CastedLinear(in_features=384, out_features=1536, bias=False)
+        (c_proj): CastedLinear(in_features=1536, out_features=384, bias=False)
+      )
+    )
+  )
+  (lm_head): CastedLinear(in_features=384, out_features=50304, bias=False)
+)
+warming up kernels...
+Initial GPU memory: 287 MB
