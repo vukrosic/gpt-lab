@@ -350,52 +350,10 @@ class GPT(nn.Module):
         assert num_layers % 2 == 0, f"Number of layers ({num_layers}) must be even for skip connections"
         self.skip_weights = nn.Parameter(torch.ones(num_layers//2))
 
-    def create_blockmasks(self, input_seq: Tensor, sliding_window_num_blocks: Tensor):
-        BLOCK_SIZE = 128
-        docs = (input_seq == 50256).cumsum(0)
-        def document_causal(b, h, q_idx, kv_idx):
-            causal_mask = q_idx >= kv_idx
-            document_mask = docs[q_idx] == docs[kv_idx]
-            return causal_mask & document_mask
-        def dense_to_ordered(dense_blockmask: Tensor):
-            num_blocks = dense_blockmask.sum(dim=-1, dtype=torch.int32)
-            indices = dense_blockmask.argsort(dim=-1, descending=False, stable=True).flip(-1).to(torch.int32)
-            return num_blocks[None, None].contiguous(), indices[None, None].contiguous()
-        
-        # manual block mask creation by @YouJiacheng
-        assert len(input_seq) % BLOCK_SIZE == 0
-        NUM_BLOCKS = len(input_seq) // BLOCK_SIZE
-        block_idx = torch.arange(NUM_BLOCKS, dtype=torch.int32, device="cuda")
-        causal_blockmask_any = block_idx[:, None] >= block_idx
-        causal_blockmask_all = block_idx[:, None] > block_idx
-        docs_low = docs.view(-1, BLOCK_SIZE)[:, 0].contiguous()
-        docs_high = docs.view(-1, BLOCK_SIZE)[:, -1].contiguous()
-
-        # for some reason script hangs here without a collective operation to ensure synchronizatoin
-        dist.barrier()
-
-        document_blockmask_any = (docs_low[:, None] <= docs_high) & (docs_high[:, None] >= docs_low)
-        document_blockmask_all = (docs_low[:, None] == docs_high) & (docs_high[:, None] == docs_low)
-        blockmask_any = causal_blockmask_any & document_blockmask_any
-        blockmask_all = causal_blockmask_all & document_blockmask_all
-        partial_kv_num_blocks, partial_kv_indices = dense_to_ordered(blockmask_any & ~blockmask_all)
-        full_kv_num_blocks, full_kv_indices = dense_to_ordered(blockmask_all)
-        def build_bm(window_size_blocks: Tensor) -> BlockMask:
-            return BlockMask.from_kv_blocks(
-                torch.clamp_max(partial_kv_num_blocks, torch.clamp_min(window_size_blocks - full_kv_num_blocks, 1)),
-                partial_kv_indices,
-                torch.clamp_max(full_kv_num_blocks, window_size_blocks - 1),
-                full_kv_indices,
-                BLOCK_SIZE=BLOCK_SIZE,
-                mask_mod=document_causal,
-            )
-        # Long-short SWA block masks by @leloykun & @YouJiacheng, adapated from suggestion by @Grad62304977, following Gemma 2 paper
-        return build_bm(sliding_window_num_blocks), build_bm(sliding_window_num_blocks // 2)
-
     def forward(self, 
                 input_seq: Tensor, # shape (B*N)
                 target_seq: Tensor = None, # (B*N)
-                sliding_window_num_blocks: Tensor = None):
+                ):
         # sliding_window_num_blocks is tensor of shape (w) dtype int32 were w is number of blocks flexattention will use
         assert input_seq.ndim == 1
 
@@ -404,16 +362,14 @@ class GPT(nn.Module):
         ve = [ve[0], ve[1], ve[2]] + [None] * (len(self.blocks) - 6) + [ve[0], ve[1], ve[2]]
         assert len(ve) == len(self.blocks)
 
-        if sliding_window_num_blocks is None:
-            sliding_window_num_blocks = torch.tensor(
-                next_multiple_of_n(self.model_dim, n=128) // 128, 
-                dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        long_bm, short_bm = self.create_blockmasks(input_seq, sliding_window_num_blocks)
-        # Adjust block_masks for the number of layers we have
-        # Original: [long_bm, short_bm, short_bm, short_bm, long_bm, short_bm, short_bm, long_bm, short_bm, short_bm, short_bm, long_bm]
-        # TODO make a more interesting dynamic layout for block masks more resembling the original at any length
-        block_masks = [long_bm] + ([short_bm] * (len(self.blocks) - 2)) + [long_bm]
-        assert len(block_masks) == len(self.blocks)
+        # creating flex-attentio mask
+        docs = (input_seq == 50256).cumsum(0)
+        def doc_causal(b, h, q_idx, kv_idx):
+            causal_mask = q_idx >= kv_idx
+            document_mask = docs[q_idx] == docs[kv_idx]
+            return causal_mask & document_mask
+        # Because the sparsity pattern is independent of batch and heads, we'll set them to None (which broadcasts them) 
+        block_mask = create_block_mask(doc_causal, B=None, H=None, Q_LEN=len(input_seq), KV_LEN=len(input_seq))
 
         x = x0 = norm(self.embed(input_seq)[None]) # use of norm here by @Grad62304977
 
@@ -423,7 +379,7 @@ class GPT(nn.Module):
         for i in range(len(self.blocks)):
             if i >= n:
                 x = x + self.skip_weights[i - n] * skip_connections.pop()
-            x = self.blocks[i](x, ve[i], x0, block_masks[i])
+            x = self.blocks[i](x, ve[i], x0, block_mask)
             if i < n:
                 skip_connections.append(x)
 
@@ -680,17 +636,6 @@ def get_lr(step: int):
         w = (1 - x) / args.cooldown_frac
         return w * 1.0 + (1 - w) * 0.1
 
-# attention window size schedule: linearly increase
-@lru_cache(1) # lru_cache memorizes output of this function rather than re-create tensor every time
-def get_window_size_blocks_helper(window_size: int):
-    return torch.tensor(window_size // 128, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-def get_window_size_blocks(step: int = None):
-    x = 1 if step is None else step / args.num_iterations # progress in training
-    assert 0 <= x <= 1
-    # Linearly increase the block-wise sliding window size over training
-    window_size = next_multiple_of_n(args.model_dim * x, n=128)
-    return get_window_size_blocks_helper(window_size)
-
 # Use a more memory-efficient compilation option
 # Disable torch.compile for now as it's causing tensor dimension issues
 model: nn.Module = torch.compile(model, dynamic=False, mode="reduce-overhead")
@@ -715,8 +660,7 @@ initial_state = dict(model=copy.deepcopy(model.state_dict()),
                      optimizers=[copy.deepcopy(opt.state_dict()) for opt in optimizers]) # save the initial state
 for _ in range(warmup_steps):
     inputs = targets = torch.randint(0, args.vocab_size, size=(args.train_seq_len,), device="cuda", dtype=torch.int64)
-    window_size_blocks = get_window_size_blocks(0)
-    loss = model(inputs.to(torch.int32), targets, window_size_blocks)
+    loss = model(inputs.to(torch.int32), targets)
     loss.backward()
     for param in model.parameters():
         dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
@@ -791,7 +735,7 @@ for step in range(train_steps + 1):
                 if inputs.size(0) > args.val_seq_len:
                     inputs = inputs[:args.val_seq_len]
                     targets = targets[:args.val_seq_len]
-                val_loss += model(inputs, targets, get_window_size_blocks(step))
+                val_loss += model(inputs, targets)
         val_loss /= val_steps
         del val_loader
         dist.all_reduce(val_loss, op=dist.ReduceOp.AVG)
@@ -818,7 +762,7 @@ for step in range(train_steps + 1):
         inputs = inputs[:args.train_seq_len]
         targets = targets[:args.train_seq_len]
         
-    model(inputs, targets, get_window_size_blocks(step)).backward()
+    model(inputs, targets).backward()
     for param in model.parameters():
         dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
     # set optimization hyperparameters
@@ -840,20 +784,6 @@ for step in range(train_steps + 1):
 
 print0(f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB "
        f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB", console=True)
-
-# Then at the end of training:
-#if master_process: 
-# by allowing them both to do it but only printing from master we avoid messing with dist.barrier() in mask creation
-# TODO figure out how to remove dist.barrier from block mask creation
-prompts = [
-    "Once upon a time,",
-    "The meaning of life is",
-    "In the year 2026,",
-    "I'm a Large Language Model (LLM), which means"
-]
-for prompt in prompts:
-    continuation = sample_from_model(model, prompt, max_new_tokens=16)
-    print0(continuation, console=True)
 
 ########################################
 #        HellaSwag Evaluation         #
@@ -989,7 +919,7 @@ def evaluate_hellaswag(model, data_path, limit=1014):
     # Gather results from all processes
     correct_tensor = torch.tensor([local_correct], dtype=torch.float32, device="cuda")
     correct_norm_tensor = torch.tensor([local_correct_norm], dtype=torch.float32, device="cuda")
-    total_tensor = torch.tensor([local_total], dtype=torch.float32, device="cuda")
+    total_tensor = torch.tensor([local_total], dtype=torch.float32, device="cuda")   
     dist.all_reduce(correct_tensor, op=dist.ReduceOp.SUM)
     dist.all_reduce(correct_norm_tensor, op=dist.ReduceOp.SUM)
     dist.all_reduce(total_tensor, op=dist.ReduceOp.SUM)
@@ -1036,8 +966,25 @@ hellaswag_path = "./data/hellaswag/hellaswag_val.jsonl"
 # Check if the HellaSwag data file exists
 if os.path.exists(hellaswag_path):
     print0(f"Found HellaSwag dataset at {hellaswag_path}", console=True)
-    evaluate_hellaswag(model, hellaswag_path, limit=20)#1014)
+    evaluate_hellaswag(model, hellaswag_path, limit=1014)
 else:
     print0(f"HellaSwag dataset not found at {hellaswag_path}, skipping evaluation.", console=True)
 
 dist.destroy_process_group()
+
+########################################
+#        FINAL OUTPUT EXAMPLES         #
+########################################
+
+# Then at the end of training:
+# by allowing them both to do it but only printing from master we avoid messing with dist.barrier() in mask creation
+if master_process: 
+    prompts = [
+        "Once upon a time,",
+        "The meaning of life is",
+        "In the year 2026,",
+        "I'm a Large Language Model (LLM), which means"
+    ]
+    for prompt in prompts:
+        continuation = sample_from_model(model, prompt, max_new_tokens=16)
+        print0(continuation, console=True)

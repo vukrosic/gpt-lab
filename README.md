@@ -23,11 +23,12 @@ todos:
     - [x] print score at end of training
     - [x] confidence intervals
     - [x] cleanup
+    - [x] distribute hellaswag benchmark
 - [x] rename to NanoGPT-Lab
 - [x] fix issue getting stuck at warmup kernels
-- [x] distribute hellaswag benchmark
 - [x] look thru the long/short_bm to figure out if it actually makes sense to use a simple causal mask during inference (likely doesn't; prolly gonna have to switch back to the training masks)
-    - [ ] test to make sure this worked; when i did it i was on some broken GPUs
+    - [x] test to make sure this worked; when i did it i was on some broken GPUs
+    - [x] switch back to normal doc-causal tokenizer to avoid headache
 - [ ] switch from gpt2 tokenizer default to whatever newest tokenizer has easily available pre-tokenized fineweb data available for download
 - [ ] add custom tokenizers option through tiktoken
 - [ ] test again on 8xH100 to confirm I didn't break anything
