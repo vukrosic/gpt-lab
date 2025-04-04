@@ -507,23 +507,23 @@ class Hyperparameters:
     train_files = "data/fineweb*10B/fineweb*_train_*.bin" # input .bin to train on
     val_files = "data/fineweb*10B/fineweb*_val_*.bin" # input .bin to eval validation loss on
     val_tokens = 10485760 # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
-    train_seq_len = 8*1024 # FlexAttention sequence length - reduced from 48*1024 for GPUs w/ at least 8GB VRAM during testing
-    val_seq_len = 16*1024 # FlexAttention sequence length for validation - reduced from 4*64*1024
+    train_seq_len = 24*1024 # FlexAttention sequence length - reduced from 48*1024 for GPUs w/ at least 8GB VRAM during testing
+    val_seq_len = 48*1024 # FlexAttention sequence length for validation - reduced from 4*64*1024
     # optimization
-    num_iterations = 20 # number of iterations to run
+    num_iterations = 25#_000 # number of iterations to run
     cooldown_frac = 0.4 # fraction of training spent cooling down the learning rate
     # architecture
     vocab_size = 50257
     # model size - new parameters for GPUs w/ at least 8GB VRAM during testing
-    num_layers = 6  # 124m param model should be 12
-    num_heads = 6   # 124m param model should be 6
-    model_dim = 384  # must be divisible by num_heads
+    num_layers = 10  # 124m param model should be 12
+    num_heads = 8   # 124m param model should be 6
+    model_dim = 512  # must be divisible by num_heads
     head_dim = None  # if None, will be set to model_dim // num_heads
     mlp_ratio = 4  # 124m param model should be 4
     # memory optimization for GPUs w/ at least 8GB VRAM during testing
     use_fp8 = False # Set to True on H100s and newer, False on older
     # evaluation and logging
-    val_loss_every = 10 # every how many steps to evaluate val loss? 0 for only at the end
+    val_loss_every = 100 # every how many steps to evaluate val loss? 0 for only at the end
     save_checkpoint = False
 
     def __post_init__(self):

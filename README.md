@@ -29,12 +29,13 @@ todos:
 - [x] look thru the long/short_bm to figure out if it actually makes sense to use a simple causal mask during inference (likely doesn't; prolly gonna have to switch back to the training masks)
     - [x] test to make sure this worked; when i did it i was on some broken GPUs
     - [x] switch back to normal doc-causal tokenizer to avoid headache
+- [ ] implement [[DAGSeq2DAGSeq]] to test & learn more about how this repo should work
 - [ ] switch from gpt2 tokenizer default to whatever newest tokenizer has easily available pre-tokenized fineweb data available for download
 - [ ] add custom tokenizers option through tiktoken
 - [ ] test again on 8xH100 to confirm I didn't break anything
 - [ ] calc runtime of 10B? tokens on 8xH100 & therefore cost of doing research
-- [ ] add pre-made model sizes designed for different common GPU node sizes configurable by input args
-- [ ] add batched inference (especially to make hellaswag eval faster)
+- [ ] add batched inference
+    - [ ] use to speed up hellaswag
 - [ ] switch experiment output from single text file to folder with csv file of loss, model weights, etc
     - [ ] model weights should upload to huggingface or something and not the github repo. or maybe just don't bother saving them?
 - [ ] excessively comment all the Modded-NanoGPT specific architecture edits to explain what's happening
