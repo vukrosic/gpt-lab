@@ -165,15 +165,41 @@ class Muon(torch.optim.Optimizer):
         defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps)
         params: list[Tensor] = [*params]
         param_groups = []
-        for size in {p.numel() for p in params}:
-            b = torch.empty(world_size, size, dtype=torch.bfloat16, device="cuda")
-            group = dict(params=[p for p in params if p.numel() == size],
-                         update_buffer=b, update_buffer_views=[b[i] for i in range(world_size)])
-            param_groups.append(group)
+        
+        # Handle single GPU case differently
+        if world_size == 1:
+            # For single GPU case, we don't need the update buffer
+            param_groups.append(dict(params=params))
+        else:
+            # For multi-GPU case, create update buffers as before
+            for size in {p.numel() for p in params}:
+                b = torch.empty(world_size, size, dtype=torch.bfloat16, device="cuda")
+                group = dict(params=[p for p in params if p.numel() == size],
+                             update_buffer=b, update_buffer_views=[b[i] for i in range(world_size)])
+                param_groups.append(group)
+        
         super().__init__(param_groups, defaults)
 
     @torch.no_grad()
     def step(self):
+        # Handle single GPU case differently
+        if self.world_size == 1:
+            for group in self.param_groups:
+                for p in group["params"]:
+                    if p.grad is None:
+                        continue
+                    g = p.grad
+                    state = self.state[p]
+                    if "momentum_buffer" not in state:
+                        state["momentum_buffer"] = torch.zeros_like(g)
+                    buf: Tensor = state["momentum_buffer"]
+                    buf.lerp_(g, 1 - group["momentum"])
+                    g = g.lerp_(buf, group["momentum"]) if group["nesterov"] else buf
+                    g = zeropower_via_newtonschulz5(g, steps=group["ns_steps"])
+                    p.add_(g.view_as(p), alpha=-group["lr"] * max(1, p.size(-2) / p.size(-1))**0.5)
+            return
+        
+        # Original multi-GPU implementation
         for group in self.param_groups:
             update_buffer: Tensor = group["update_buffer"]
             update_buffer_views: list[Tensor] = group["update_buffer_views"]
@@ -181,11 +207,11 @@ class Muon(torch.optim.Optimizer):
             params: list[Tensor] = group["params"]
             handle = None
             params_world = None
-            def update_prev(): # optimized Muon implementation contributed by @YouJiacheng
+            def update_prev():
                 handle.wait()
                 for p_world, g_world in zip(params_world, update_buffer_views):
                     p_world.add_(g_world.view_as(p_world),
-                                 alpha=-group["lr"] * max(1, p_world.size(-2) / p_world.size(-1))**0.5)
+                                  alpha=-group["lr"] * max(1, p_world.size(-2) / p_world.size(-1))**0.5)
             for base_i in range(len(params))[::self.world_size]:
                 if base_i + self.rank < len(params):
                     p = params[base_i + self.rank]
@@ -201,7 +227,7 @@ class Muon(torch.optim.Optimizer):
                 else:
                     g = update_buffer_views[self.rank]
                 if base_i > 0:
-                    update_prev() # async all_gather instead of sync all_reduce by @YouJiacheng
+                    update_prev()
                 handle = dist.all_gather_into_tensor(update_buffer, g, async_op=True)
                 params_world = params[base_i : base_i + self.world_size]
             update_prev()
@@ -507,17 +533,17 @@ class Hyperparameters:
     train_files = "data/fineweb*10B/fineweb*_train_*.bin" # input .bin to train on
     val_files = "data/fineweb*10B/fineweb*_val_*.bin" # input .bin to eval validation loss on
     val_tokens = 10485760 # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
-    train_seq_len = 24*1024 # FlexAttention sequence length - reduced from 48*1024 for GPUs w/ at least 8GB VRAM during testing
-    val_seq_len = 48*1024 # FlexAttention sequence length for validation - reduced from 4*64*1024
+    train_seq_len = 8*1024 # FlexAttention sequence length - reduced from 48*1024 for GPUs w/ at least 8GB VRAM during testing
+    val_seq_len = 12*1024 # FlexAttention sequence length for validation - reduced from 4*64*1024
     # optimization
-    num_iterations = 20_000 # number of iterations to run
+    num_iterations = 20#_000 # number of iterations to run
     cooldown_frac = 0.4 # fraction of training spent cooling down the learning rate
     # architecture
     vocab_size = 50257
     # model size - new parameters for GPUs w/ at least 8GB VRAM during testing
-    num_layers = 10  # 124m param model should be 12
-    num_heads = 8   # 124m param model should be 6
-    model_dim = 512  # must be divisible by num_heads
+    num_layers = 6  # 124m param model should be 12
+    num_heads = 6   # 124m param model should be 6
+    model_dim = 384  # must be divisible by num_heads
     head_dim = None  # if None, will be set to model_dim // num_heads
     mlp_ratio = 4  # 124m param model should be 4
     # memory optimization for GPUs w/ at least 8GB VRAM during testing
@@ -540,16 +566,33 @@ class Hyperparameters:
 
 args = Hyperparameters()
 
-# torchrun sets these env variables
-rank = int(os.environ["RANK"])
-world_size = int(os.environ["WORLD_SIZE"])
-print(f"Running with {world_size} GPUs (min 2, max 8)")
+# Check if environment variables are set by torchrun, otherwise default to single GPU
+if "RANK" in os.environ and "WORLD_SIZE" in os.environ and "LOCAL_RANK" in os.environ:
+    # Multi-GPU setup with torchrun
+    rank = int(os.environ["RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+    local_rank = int(os.environ["LOCAL_RANK"])
+else:
+    # Single GPU setup
+    rank = 0
+    world_size = 1
+    local_rank = 0
+    os.environ["RANK"] = str(rank)
+    os.environ["WORLD_SIZE"] = str(world_size)
+    os.environ["LOCAL_RANK"] = str(local_rank)
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["MASTER_PORT"] = "29500"
+
+print(f"Running with {world_size} GPU{'s' if world_size > 1 else ''}")
 assert torch.cuda.is_available()
-device = torch.device("cuda", int(os.environ["LOCAL_RANK"]))
+device = torch.device("cuda", local_rank)
 torch.cuda.set_device(device)
-dist.init_process_group(backend="nccl", device_id=device)
-dist.barrier()
-master_process = (rank == 0) # this process will do logging, checkpointing etc.
+
+# Initialize distributed process group if using multiple GPUs
+if world_size > 1:
+    dist.init_process_group(backend="nccl", device_id=device)
+    dist.barrier()
+master_process = (rank == 0)  # this process will do logging, checkpointing etc.
 
 # begin logging
 logfile = None
@@ -606,8 +649,9 @@ model.lm_head.use_fp8 = args.use_fp8
 for m in model.modules():
     if isinstance(m, nn.Embedding):
         m.bfloat16()
-for param in model.parameters():
-    dist.broadcast(param.detach(), 0)
+if world_size > 1:
+    for param in model.parameters():
+        dist.broadcast(param.detach(), 0)
 
 # collect the parameters to optimize
 hidden_matrix_params = [p for n, p in model.blocks.named_parameters() if p.ndim >= 2 and "embed" not in n]
@@ -620,7 +664,16 @@ adam_params = [dict(params=head_params, lr=0.22), dict(params=embed_params, lr=0
 # small adam epsilon by @YouJiacheng. this is an alternate method of fixing the world_size dependence
 # discovered by @fernbear.bsky.social https://x.com/hi_tysam/status/1879692937589875094
 optimizer1 = torch.optim.Adam(adam_params, betas=(0.8, 0.95), eps=1e-10, fused=True)
-optimizer2 = Muon(hidden_matrix_params, lr=0.05, momentum=0.95, rank=rank, world_size=world_size)
+
+# For single GPU case, we need to modify how Muon is initialized
+if world_size == 1:
+    # Create update buffer for single GPU
+    for param in hidden_matrix_params:
+        param.requires_grad_(True)
+    optimizer2 = Muon(hidden_matrix_params, lr=0.05, momentum=0.95, rank=rank, world_size=world_size)
+else:
+    optimizer2 = Muon(hidden_matrix_params, lr=0.05, momentum=0.95, rank=rank, world_size=world_size)
+
 optimizers = [optimizer1, optimizer2]
 for opt in optimizers:
     for group in opt.param_groups:
@@ -662,8 +715,9 @@ for _ in range(warmup_steps):
     inputs = targets = torch.randint(0, args.vocab_size, size=(args.train_seq_len,), device="cuda", dtype=torch.int64)
     loss = model(inputs.to(torch.int32), targets)
     loss.backward()
-    for param in model.parameters():
-        dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
+    if world_size > 1:
+        for param in model.parameters():
+            dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
     for opt in optimizers:
         opt.step()
     model.zero_grad(set_to_none=True)
@@ -738,7 +792,8 @@ for step in range(train_steps + 1):
                 val_loss += model(inputs, targets)
         val_loss /= val_steps
         del val_loader
-        dist.all_reduce(val_loss, op=dist.ReduceOp.AVG)
+        if world_size > 1:
+            dist.all_reduce(val_loss, op=dist.ReduceOp.AVG)
         print0(f"step:{step}/{train_steps} val_loss:{val_loss:.4f} train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms/max(step, 1):.2f}ms", console=True)
         
         model.train()
@@ -763,8 +818,9 @@ for step in range(train_steps + 1):
         targets = targets[:args.train_seq_len]
         
     model(inputs, targets).backward()
-    for param in model.parameters():
-        dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
+    if world_size > 1:
+        for param in model.parameters():
+            dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
     # set optimization hyperparameters
     for opt in optimizers:
         for group in opt.param_groups:
@@ -889,7 +945,6 @@ def evaluate_hellaswag(model, data_path, limit=1014):
             
             # Evaluate the autoregressive loss
             shift_logits = logits[:-1, :]
-            #shift_tokens = valid_seq[1:].to(torch.int64)  # Target needs to be int64
             shift_tokens = seq[1:valid_len].to(torch.int64)  # Target needs to be int64
             shift_mask = seq_mask[1:valid_len]  # Shift mask to align with shifted tokens
             
@@ -920,9 +975,12 @@ def evaluate_hellaswag(model, data_path, limit=1014):
     correct_tensor = torch.tensor([local_correct], dtype=torch.float32, device="cuda")
     correct_norm_tensor = torch.tensor([local_correct_norm], dtype=torch.float32, device="cuda")
     total_tensor = torch.tensor([local_total], dtype=torch.float32, device="cuda")   
-    dist.all_reduce(correct_tensor, op=dist.ReduceOp.SUM)
-    dist.all_reduce(correct_norm_tensor, op=dist.ReduceOp.SUM)
-    dist.all_reduce(total_tensor, op=dist.ReduceOp.SUM)
+    
+    # Handle distributed reduction
+    if world_size > 1:
+        dist.all_reduce(correct_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(correct_norm_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(total_tensor, op=dist.ReduceOp.SUM)
     
     # Calculate final metrics on master process
     if master_process:
@@ -966,11 +1024,12 @@ hellaswag_path = "./data/hellaswag/hellaswag_val.jsonl"
 # Check if the HellaSwag data file exists
 if os.path.exists(hellaswag_path):
     print0(f"Found HellaSwag dataset at {hellaswag_path}", console=True)
-    evaluate_hellaswag(model, hellaswag_path, limit=1014)
+    evaluate_hellaswag(model, hellaswag_path, limit=20)#1014)
 else:
     print0(f"HellaSwag dataset not found at {hellaswag_path}, skipping evaluation.", console=True)
 
-dist.destroy_process_group()
+if world_size > 1:
+    dist.destroy_process_group()
 
 ########################################
 #        FINAL OUTPUT EXAMPLES         #
