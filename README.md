@@ -31,9 +31,11 @@ todos:
     - [x] switch back to normal doc-causal tokenizer to avoid headache
 - [x] test more than two GPUs to confirm I didn't break anything
 - [x] implement ability to run on a single GPU without a hacky debug config
+- [x] eliminate redundancy in dataset download scripts
+- [ ] setup for custom tokenizer into `raw_fineweb.py` that replicates GPT2 for now but will be easy to edit later
 - [ ] implement [[DAGSeq2DAGSeq]] to test & learn more about how this repo should work
 - [ ] switch from gpt2 tokenizer default to whatever newest tokenizer has easily available pre-tokenized fineweb data available for download
-- [ ] add custom tokenizers option through tiktoken
+- [ ] upgrade from fineweb to fineweb2 or similar
 - [ ] calc runtime of 10B? tokens on 8xH100 & therefore cost of doing research
 - [ ] add batched inference
     - [ ] use to speed up hellaswag
