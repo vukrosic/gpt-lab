@@ -539,6 +539,7 @@ class Hyperparameters:
     num_iterations = 20#_000 # number of iterations to run
     cooldown_frac = 0.4 # fraction of training spent cooling down the learning rate
     # architecture
+    tokenizer = "gpt2" # options are "gpt2" and "custom"
     vocab_size = 50257
     # model size - new parameters for GPUs w/ at least 8GB VRAM during testing
     num_layers = 6  # 124m param model should be 12
@@ -563,6 +564,9 @@ class Hyperparameters:
         assert self.num_layers >= 2, f"num_layers must be greater than or equal to 2 because of attention mask structure, got {self.num_layers}"
         assert self.num_layers >= 6, f"num_layers must be greater than or equal to 2 because of value embeddings structure, got {self.num_layers}"
             # TODO adjust value embeddings to be more dynamic later
+        assert self.tokenizer in ["gpt2", "custom"]
+        if self.tokenizer == "gpt2":
+            assert self.vocab_size == 50257
 
 args = Hyperparameters()
 
@@ -738,7 +742,19 @@ print0("kernels are toasty", console=True)
 def sample_from_model(model, prompt, max_new_tokens=100, temperature=0.8, top_k=200):
     """Generate text samples from the model given a prompt."""
     # We need an encoding function - assuming you'll use tiktoken or similar
-    enc = tiktoken.get_encoding("gpt2")
+    if args.tokenizer == "gpt2":
+        enc = tiktoken.get_encoding("gpt2")
+    if args.tokenizer == "custom":
+        with open('data/tokenizer.json', 'r') as f:
+            tokenizer_config = json.load(f)
+        enc = tiktoken.Encoding(
+            name="custom",
+            pat_str=tokenizer_config['pat_str'],
+            mergeable_ranks=tokenizer_config['mergeable_ranks'],
+            special_tokens={
+                "<|endoftext|>": len(tokenizer_config['mergeable_ranks']),
+            }
+        )
     encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
     decode = lambda l: enc.decode(l)
     
@@ -889,7 +905,19 @@ def evaluate_hellaswag(model, data_path, limit=1014):
     """Evaluate model on HellaSwag in a distributed way using modulo distribution"""
     assert limit <= 1014, f'there are only 1014 questions in the benchmark, but got limit={limit}'
     torch._dynamo.config.disable = True
-    enc = tiktoken.get_encoding("gpt2")
+    if args.tokenizer == "gpt2":
+        enc = tiktoken.get_encoding("gpt2")
+    if args.tokenizer == "custom":
+        with open('data/tokenizer.json', 'r') as f:
+            tokenizer_config = json.load(f)
+        enc = tiktoken.Encoding(
+            name="custom",
+            pat_str=tokenizer_config['pat_str'],
+            mergeable_ranks=tokenizer_config['mergeable_ranks'],
+            special_tokens={
+                "<|endoftext|>": len(tokenizer_config['mergeable_ranks']),
+            }
+        )
     model.eval()
     
     # Local counters

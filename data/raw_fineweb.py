@@ -20,11 +20,13 @@ import argparse
 import multiprocessing as mp
 import numpy as np
 import tiktoken
+import json
 # from huggingface_hub import snapshot_download
 from datasets import load_dataset
 from tqdm import tqdm
 import argparse
 import numpy as np
+
 def write_datafile(filename, toks):
     """ 
     Saves token data as a .bin file, for reading in C.
@@ -73,9 +75,18 @@ os.makedirs(DATA_CACHE_DIR, exist_ok=True)
 # download the dataset
 fw = load_dataset("HuggingFaceFW/fineweb", name=remote_name, split="train")
 
-### edit this code if you want to use a custom tokenizer
-# init the tokenizer
-enc = tiktoken.get_encoding("gpt2")
+# Load the tokenizer configuration from the JSON file
+with open('tokenizer.json', 'r') as f:
+    tokenizer_config = json.load(f)
+# Initialize the tokenizer with the loaded configuration
+enc = tiktoken.Encoding(
+    name="custom",
+    pat_str=tokenizer_config['pat_str'],
+    mergeable_ranks=tokenizer_config['mergeable_ranks'],
+    special_tokens={
+        "<|endoftext|>": len(tokenizer_config['mergeable_ranks']),
+    }
+)
 eot = enc._special_tokens['<|endoftext|>'] # end of text token
 def tokenize(doc):
     # tokenizes a single document and returns a numpy array of uint16 tokens
