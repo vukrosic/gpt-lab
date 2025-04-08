@@ -4,10 +4,11 @@ import json
 cl100k_base = tiktoken.get_encoding("cl100k_base")
 print(cl100k_base._pat_str)
 print(type(cl100k_base._mergeable_ranks))
-for i, (key, val) in enumerate(zip(cl100k_base._mergeable_ranks.keys(), cl100k_base._mergeable_ranks.values())):
+for i, (key, val) in enumerate(cl100k_base._mergeable_ranks.items()):
     if i > 5 and i < len(cl100k_base._mergeable_ranks) - 5:
         continue
     print(i, key, val)
+    print(type(key))
 # In production, load the arguments directly instead of accessing private attributes
 # See openai_public.py for examples of arguments for specific encodings
 
@@ -15,12 +16,17 @@ for i, (key, val) in enumerate(zip(cl100k_base._mergeable_ranks.keys(), cl100k_b
 with open('custom_tokenizer.json', 'r') as f:
     tokenizer_config = json.load(f)
 # Initialize the tokenizer with the loaded configuration
-print(tokenizer_config['pat_str'])
-print(type(tokenizer_config['mergeable_ranks']))
-for i, (key, val) in enumerate(zip(tokenizer_config['mergeable_ranks'].keys(), tokenizer_config['mergeable_ranks'].values())):
-    if i > 5 and i < len(tokenizer_config['mergeable_ranks']) - 5:
+# Convert back to bytes objects
+mergeable_ranks = {
+    #bytes(k): v for k, v in tokenizer_config["mergeable_ranks"].items()
+    k.encode('utf-8'): v for k, v in tokenizer_config["mergeable_ranks"].items()
+}
+
+for i, (key, val) in enumerate(mergeable_ranks.items()):
+    if i > 5 and i < len(mergeable_ranks) - 5:
         continue
     print(i, key, val)
+    print(type(key))
 
 enc1 = tiktoken.Encoding(
     # If you're changing the set of special tokens, make sure to use a different name
@@ -39,8 +45,8 @@ enc1 = tiktoken.Encoding(
 enc2 = tiktoken.Encoding(
     name="custom",
     pat_str=tokenizer_config['pat_str'],
-    mergeable_ranks=tokenizer_config['mergeable_ranks'],
+    mergeable_ranks=mergeable_ranks,
     special_tokens={
-        "<|endoftext|>": len(tokenizer_config['mergeable_ranks']),
+        "<|endoftext|>": len(mergeable_ranks),
     }
 )

@@ -97,18 +97,17 @@ if args.max_docs is not None:
 # Load the tokenizer configuration from the JSON file
 with open(args.tokenizer, 'r') as f:
     tokenizer_config = json.load(f)
+mergeable_ranks = {k.encode('utf-8'): v for k, v in tokenizer_config["mergeable_ranks"].items()}
 # Initialize the tokenizer with the loaded configuration
-print(type(tokenizer_config['pat_str']))
-print(type(tokenizer_config['mergeable_ranks']))
 enc = tiktoken.Encoding(
     name="custom",
     pat_str=tokenizer_config['pat_str'],
-    mergeable_ranks=tokenizer_config['mergeable_ranks'],
+    mergeable_ranks=mergeable_ranks,
     special_tokens={
-        "<|endoftext|>": len(tokenizer_config['mergeable_ranks']),
+        "endoftext": len(mergeable_ranks),
     }
 )
-eot = enc._special_tokens['<|endoftext|>'] # end of text token
+eot = enc._special_tokens['endoftext'] # end of text token
 def tokenize(doc):
     # tokenizes a single document and returns a numpy array of uint16 tokens
     tokens = [eot] # the special <|endoftext|> token delimits all documents

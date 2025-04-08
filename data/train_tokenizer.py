@@ -12,6 +12,7 @@ import argparse
 import numpy as np
 from datasets import load_dataset
 from tqdm import tqdm
+import json
 
 import torch
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -182,8 +183,6 @@ def bpe_train(
         # Using the dictionary in reverse to get the bytes corresponding to these IDs
         most_common_bytes = [None, None]
         for bytes_token, id_token in ranks.items():
-            if None is not in most_common_bytes:
-                break # early exit
             if id_token == most_common_pair[0]:
                 most_common_bytes[0] = bytes_token
             if id_token == most_common_pair[1]:
@@ -350,31 +349,14 @@ def train_simple_encoding(sample_size=100, vocab_size=600, download_dir="data/fi
 
 def save_tokenizer(enc, filename="custom_tokenizer.json"):
     """Save the tokenizer for later use"""
-    import json
-    
-    # Store bytes as lists of integers instead of hex strings
-    mergeable_ranks = {tuple(k): v for k, v in enc.mergeable_ranks.items()}
-    
+    mergeable_ranks = {str(k)[2:-1]: v for k, v in enc.mergeable_ranks.items()}
     tokenizer_data = {
         "pat_str": enc.pat_str,
         "mergeable_ranks": mergeable_ranks,
     }
-    
     with open(filename, "w") as f:
         json.dump(tokenizer_data, f)
-    
     print(f"Tokenizer saved to {filename}")
-
-
-def load_tokenizer(filename="custom_tokenizer.json"):
-    """Load a previously saved tokenizer"""
-    import json
-    with open(filename, "r") as f:
-        data = json.load(f)
-    # Convert tuples of integers back to bytes
-    mergeable_ranks = {bytes(map(int, eval(k))): v for k, v in data["mergeable_ranks"].items()}
-    # Create tokenizer
-    return SimpleBytePairEncoding(pat_str=data["pat_str"], mergeable_ranks=mergeable_ranks)
 
 
 if __name__ == "__main__":
