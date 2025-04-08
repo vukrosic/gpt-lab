@@ -352,8 +352,8 @@ def save_tokenizer(enc, filename="custom_tokenizer.json"):
     """Save the tokenizer for later use"""
     import json
     
-    # Convert bytes keys to strings for JSON serialization
-    mergeable_ranks = {str(k.hex()): v for k, v in enc.mergeable_ranks.items()}
+    # Store bytes as lists of integers instead of hex strings
+    mergeable_ranks = {tuple(k): v for k, v in enc.mergeable_ranks.items()}
     
     tokenizer_data = {
         "pat_str": enc.pat_str,
@@ -371,8 +371,8 @@ def load_tokenizer(filename="custom_tokenizer.json"):
     import json
     with open(filename, "r") as f:
         data = json.load(f)
-    # Convert string keys back to bytes
-    mergeable_ranks = {bytes.fromhex(k): v for k, v in data["mergeable_ranks"].items()}
+    # Convert tuples of integers back to bytes
+    mergeable_ranks = {bytes(map(int, eval(k))): v for k, v in data["mergeable_ranks"].items()}
     # Create tokenizer
     return SimpleBytePairEncoding(pat_str=data["pat_str"], mergeable_ranks=mergeable_ranks)
 
