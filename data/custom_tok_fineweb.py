@@ -20,13 +20,12 @@ import argparse
 import multiprocessing as mp
 import numpy as np
 import tiktoken
-import json
 # from huggingface_hub import snapshot_download
 from datasets import load_dataset
 from tqdm import tqdm
 import argparse
 import numpy as np
-from tqdm import tqdm
+import pickle
 
 def write_datafile(filename, toks):
     """ 
@@ -94,20 +93,19 @@ if args.max_docs is not None:
     print(f"Using only the first {args.max_docs} documents")
     fw = fw.take(args.max_docs)
 
-# Load the tokenizer configuration from the JSON file
-with open(args.tokenizer, 'r') as f:
-    tokenizer_config = json.load(f)
-mergeable_ranks = {k.encode('utf-8'): v for k, v in tokenizer_config["mergeable_ranks"].items()}
+# Load the tokenizer configuration from the pkl file
+f = open('custom_tokenizer.pkl', 'rb')
+tokenizer_config = pickle.load(f)
 # Initialize the tokenizer with the loaded configuration
 enc = tiktoken.Encoding(
     name="custom",
     pat_str=tokenizer_config['pat_str'],
-    mergeable_ranks=mergeable_ranks,
+    mergeable_ranks=tokenizer_config['mergeable_ranks'],
     special_tokens={
-        "endoftext": len(mergeable_ranks),
+        "<|endoftext|>": len(tokenizer_config['mergeable_ranks']),
     }
 )
-eot = enc._special_tokens['endoftext'] # end of text token
+eot = enc._special_tokens['<|endoftext|>'] # end of text token
 def tokenize(doc):
     # tokenizes a single document and returns a numpy array of uint16 tokens
     tokens = [eot] # the special <|endoftext|> token delimits all documents
@@ -118,14 +116,14 @@ def tokenize(doc):
     return tokens_np_uint16
 
 # tokenize all documents and write output shards, each of shard_size tokens (last shard has remainder)
-nprocs = max(1, os.cpu_count() - 4)#2) # don't hog the entire system
+nprocs = max(1, os.cpu_count() - 2) # don't hog the entire system
 with mp.Pool(nprocs) as pool:
     shard_index = 0
     # preallocate buffer to hold current shard
     all_tokens_np = np.empty((args.shard_size,), dtype=np.uint16)
     token_count = 0
     progress_bar = None
-    for tokens in tqdm(pool.imap(tokenize, fw, chunksize=16)):
+    for tokens in pool.imap(tokenize, fw, chunksize=16):
 
         # is there enough space in the current shard for the new tokens?
         if token_count + len(tokens) < args.shard_size:

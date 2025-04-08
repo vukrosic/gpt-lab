@@ -12,8 +12,7 @@ import argparse
 import numpy as np
 from datasets import load_dataset
 from tqdm import tqdm
-import json
-
+import pickle
 import torch
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -347,15 +346,14 @@ def train_simple_encoding(sample_size=100, vocab_size=600, download_dir="data/fi
     return enc
 
 
-def save_tokenizer(enc, filename="custom_tokenizer.json"):
+def save_tokenizer(enc, filename="custom_tokenizer.pkl"):
     """Save the tokenizer for later use"""
-    mergeable_ranks = {str(k)[2:-1]: v for k, v in enc.mergeable_ranks.items()}
     tokenizer_data = {
         "pat_str": enc.pat_str,
-        "mergeable_ranks": mergeable_ranks,
+        "mergeable_ranks": enc.mergeable_ranks,
     }
-    with open(filename, "w") as f:
-        json.dump(tokenizer_data, f)
+    f = open(filename, 'wb')
+    pickle.dump(tokenizer_data, f)
     print(f"Tokenizer saved to {filename}")
 
 
@@ -363,7 +361,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a custom BPE tokenizer")
     parser.add_argument("--samples", type=int, default=1_000, help="Number of FineWeb samples to use for training")
     parser.add_argument("--vocab-size", type=int, default=50257, help="Size of the vocabulary to train")
-    parser.add_argument("--save", type=str, default="custom_tokenizer.json", help="Filename to save the tokenizer")
+    parser.add_argument("--save", type=str, default="custom_tokenizer.pkl", help="Filename to save the tokenizer (.pkl)")
     parser.add_argument("--download-dir", type=str, default="fineweb_temp", help="Directory for temporary download files")
     parser.add_argument("--delete_dataset", action="store_true", help="Delete downloaded data after training")
     parser.add_argument("--visualise", action="store_true", help="Visualization mode during training")
