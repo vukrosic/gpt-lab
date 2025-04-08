@@ -57,16 +57,22 @@ def write_datafile(filename, toks):
 parser = argparse.ArgumentParser(description="FineWeb dataset preprocessing")
 parser.add_argument("-v", "--version", type=str, default="10B", help="Which version of fineweb to use 10B|100B")
 parser.add_argument("-s", "--shard_size", type=int, default=10**8, help="Size of each shard in tokens")
+parser.add_argument("--vsize", type=int, default=50257, help="Size of the vocabulary to train")
+parser.add_argument("--tokenizer", type=str, default="custom_tokenizer.json", help="Filename of custom tokenizer (json)")
 args = parser.parse_args()
 
 # FineWeb has a few possible subsamples available
-assert args.version in ["10B", "100B"], "version must be one of 10B, 100B"
+assert args.version in ["10B", "100B", "10Bedu"], "version must be one of 10B, 100B, or 10Bedu"
 if args.version == "10B":
     local_dir = "fineweb10B"
     remote_name = "sample-10BT"
 elif args.version == "100B":
     local_dir = "fineweb100B"
     remote_name = "sample-100BT"
+elif args.version == "10Bedu":
+    print('edu not yet supported. downloading regular 10B')
+    local_dir = "fineweb10B"
+    remote_name = "sample-10BT" # TODO find correct name for edu 10B
 
 # create the cache the local directory if it doesn't exist yet
 DATA_CACHE_DIR = os.path.join(os.path.dirname(__file__), local_dir)
@@ -76,7 +82,7 @@ os.makedirs(DATA_CACHE_DIR, exist_ok=True)
 fw = load_dataset("HuggingFaceFW/fineweb", name=remote_name, split="train")
 
 # Load the tokenizer configuration from the JSON file
-with open('tokenizer.json', 'r') as f:
+with open(args.tokenizer, 'r') as f:
     tokenizer_config = json.load(f)
 # Initialize the tokenizer with the loaded configuration
 enc = tiktoken.Encoding(

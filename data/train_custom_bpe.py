@@ -14,9 +14,7 @@ from datasets import load_dataset
 from tqdm import tqdm
 
 import torch
-device = "cuda" if torch.cuda.is_available() \
-    else 'mps' if torch.backends.mps.is_available() \
-    else "cpu"
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
 class SimpleBytePairEncoding:
     def __init__(self, *, pat_str: str, mergeable_ranks: dict[bytes, int]) -> None:
@@ -117,7 +115,7 @@ def bpe_encode(
     tokens = [mergeable_ranks[part] for part in parts]
     return tokens
 
-def merge(words, most_common_pair, token_bytes):
+def slow_merge(words, most_common_pair, token_bytes):
     new_words = []
     for word in words:
         new_word = []
@@ -135,6 +133,7 @@ def merge(words, most_common_pair, token_bytes):
         new_words.append(new_word)
     return new_words
 
+
 def bpe_train(
     data: str, vocab_size: int, pat_str: str, visualise: bool = False
 ) -> dict[bytes, int]:
@@ -150,51 +149,70 @@ def bpe_train(
     words: list[list[bytes]] = [
         [bytes([b]) for b in word.encode("utf-8")] for word in regex.findall(pat_str, data)
     ]
+    m = max([len(word) for word in words])
+    # Create a list to store numeric token IDs for tensor operations
+    # Initially, these are just byte values (0-255)
+    ids_list = [[ranks[b] for b in word] for word in words]
+    # turn data into parseable tensor - using the token IDs instead of raw bytes
+    ids = [torch.cat(
+        (torch.tensor(word, dtype=int_type, device=device),
+        -1 * torch.ones((m - len(word) + 1,), dtype=int_type, device=device)),
+        dim = 0) for word in ids_list]
+    ids = torch.cat(tuple(word.unsqueeze(0) for word in ids), dim=1).squeeze(0)
+        # shape (words_in_data * longest_word_len)
 
-    # Initialize demo text tokens outside the loop to track changes across iterations
-    demo_text = "This is a test of our custom trained BPE tokenizer on FineWeb data. It should handle punctuation, numbers (like 42 and 3.14159), and special characters ($#@!) properly."
-    demo_words = [[bytes([b]) for b in word.encode("utf-8")] for word in regex.findall(pat_str, demo_text)]
+    if visualise:
+        # Initialize demo text tokens outside the loop to track changes across iterations
+        demo_text = (f"This is a test of our custom trained BPE tokenizer on FineWeb data."
+                    f" It should handle punctuation, numbers (like 42 and 3.14159), and special characters ($#@!) properly.")
+        demo_words = [[bytes([b]) for b in word.encode("utf-8")] for word in regex.findall(pat_str, demo_text)]
 
     # Now, use our data to figure out which merges we should make
     for j in tqdm(range(257, vocab_size)):
-        # turn data into parseable tensor
-        m = max([len(word) for word in words])
-        words_tensor = [torch.cat(
-            torch.tensor(word, dtype=int_type, device=device),
-            -1 * torch.ones(m - len(word) + 1, dtype=int_type, device=device),
-            dim = 0) for word in words]
-        words_tensor = torch.cat(tuple(word.unsqueeze(0) for word in words_tensor), dim=0)
-
         # find most common pair
-        pairs = torch.stack((words_tensor[:, :-1], words_tensor[:, 1:]), dim=0)
-        pairs = pairs.reshape(pairs.shape[0], -1)
-        unique, counts = torch.unique(pairs, sorted=False, return_counts=True, dim=1)
-        mask = torch.all(unique != -1, dim=0)
-        valid_counts = torch.where(mask, counts, torch.tensor(0, dtype=counts.dtype))
-        pair_index = torch.argmax(valid_counts)
-        most_common_pair, count = unique[:, pair_index], counts[pair_index]
+        pairs = torch.stack((ids[:-1], ids[1:]), dim=0) # (2, words_in_data * longest_word_len)
+        unique, counts = torch.unique(pairs, return_counts=True, dim=1)
+            # shapes (2, words_in_data * longest_word_len) and (words_in_data * longest_word_len)
+        valid_mask = torch.all(unique != -1, dim=0)
+        valid_counts = torch.where(valid_mask, counts, 0)
+        pair_index = torch.argmax(valid_counts) # shape (1)
+        most_common_pair = unique[:, pair_index].cpu().numpy() # (2)
 
-        # add new byte pair encoding to ranks
-        token_bytes = most_common_pair[0].item() + most_common_pair[1].item()
-        token = len(ranks)
+        # Map token IDs back to the corresponding byte sequences
+        # Using the dictionary in reverse to get the bytes corresponding to these IDs
+        most_common_bytes = [None, None]
+        for bytes_token, id_token in ranks.items():
+            if None is not in most_common_bytes:
+                break # early exit
+            if id_token == most_common_pair[0]:
+                most_common_bytes[0] = bytes_token
+            if id_token == most_common_pair[1]:
+                most_common_bytes[1] = bytes_token
+        token_bytes = most_common_bytes[0] + most_common_bytes[1]
+        new_token_id = len(ranks)
         # Add the new token!
-        ranks[token_bytes] = token
+        ranks[token_bytes] = new_token_id
 
-        # Now merge that most common pair in all the words. That is, update our training data
-        # to reflect our decision to make that pair into a new token.
-        words = merge(words, most_common_pair, token_bytes)
-        # Also apply the same merge to our demo text
-        demo_words = merge(demo_words, most_common_pair, token_bytes)
+        # Now merge that most common pair in all the words
+        pair_mask = (pairs[0] == most_common_pair[0]) & (pairs[1] == most_common_pair[1]) 
+        ids[:-1][pair_mask] = new_token_id
+        ids[1:][pair_mask] = -2
+        keep_mask = (ids != -2)
+        ids = ids[keep_mask]
 
-        # See the intermediate merges play out!
-        if visualise and (j % 50 == 0 or j in [257, vocab_size - 1]):
-            print(f"The current most common pair is {most_common_pair[0]} + {most_common_pair[1]}")
-            print(f"So we made {token_bytes} our {len(ranks)}th token")
-            print("Now our demo text looks like:")
-            # Flatten the demo words into a single list of tokens for visualization
-            demo_tokens = [token for word in demo_words for token in word]
-            visualise_tokens(demo_tokens)
-            print("\n")
+        if visualise:
+            # Also apply the same merge to our demo text
+            demo_words = slow_merge(demo_words, tuple(most_common_bytes), token_bytes)
+
+            # See the intermediate merges play out!
+            if j % 500 == 0 or j in [257, vocab_size - 1]:
+                print(f"The most common pair {most_common_pair[0]} + {most_common_pair[1]} "
+                        f"has a count of {valid_counts[pair_index]}\n"
+                        f"So we made {token_bytes} our {len(ranks)}th token")
+                # Flatten the demo words into a single list of tokens for visualization
+                demo_tokens = [token for word in demo_words for token in word]
+                visualise_tokens(demo_tokens)
+                print("\n")
 
     return ranks
 
@@ -238,7 +256,8 @@ def fetch_fineweb_data(max_samples=100, download_dir="data/fineweb_temp", show_s
     # NOTE DOES NOT CHECK TO SEE IF CACHED DATA IS SIZE REQUESTED BY INPUT ARGS
     data_cache_file = os.path.join(download_dir, "cached_data.txt")
     if os.path.exists(data_cache_file):
-        print(f"Found existing data in {download_dir}. Using cached data.")
+        print(f"Found existing data in {download_dir}. Using cached data."
+                f"\nWARMING: CACHED DATA MAY NOT BE SAME LENGTH AS INPUT ARGUMENT")
         with open(data_cache_file, "r") as f:
             return f.read()
     
@@ -301,16 +320,16 @@ def train_simple_encoding(sample_size=100, vocab_size=600, download_dir="data/fi
     Returns:
         The trained tokenizer
     """
-    gpt2_pattern = (r"""'s|'t|'re|'ve|'m|'ll|'d| ?[\p{L}]+| ?[\p{N}]+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
-    #gpt4_pattern = (
-        #r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
-    #)
+    #pattern = (r"""'s|'t|'re|'ve|'m|'ll|'d| ?[\p{L}]+| ?[\p{N}]+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
+    pattern = (
+        r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
+    )
     
     print(f"Training tokenizer on {sample_size} FineWeb samples with vocab_size={vocab_size}")
     data = fetch_fineweb_data(max_samples=sample_size, download_dir=download_dir, show_stats=show_stats)
 
     # Train the tokenizer with the specified vocabulary size (one less to account for the special token)
-    enc = SimpleBytePairEncoding.train(data, vocab_size=vocab_size, pat_str=gpt2_pattern, visualise=visualise)
+    enc = SimpleBytePairEncoding.train(data, vocab_size=vocab_size, pat_str=pattern, visualise=visualise)
     
     # Clean up download directory if requested
     if clean_up:
@@ -347,27 +366,22 @@ def save_tokenizer(enc, filename="custom_tokenizer.json"):
     print(f"Tokenizer saved to {filename}")
 
 
-def load_tokenizer(filename="tokenizer.json"):
+def load_tokenizer(filename="custom_tokenizer.json"):
     """Load a previously saved tokenizer"""
     import json
-    
     with open(filename, "r") as f:
         data = json.load(f)
-    
     # Convert string keys back to bytes
     mergeable_ranks = {bytes.fromhex(k): v for k, v in data["mergeable_ranks"].items()}
-    
     # Create tokenizer
-    tokenizer = SimpleBytePairEncoding(pat_str=data["pat_str"], mergeable_ranks=mergeable_ranks)
-    
-    return tokenizer
+    return SimpleBytePairEncoding(pat_str=data["pat_str"], mergeable_ranks=mergeable_ranks)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a custom BPE tokenizer")
-    parser.add_argument("--samples", type=int, default=100, help="Number of FineWeb samples to use for training")
-    parser.add_argument("--vocab-size", type=int, default=600, help="Size of the vocabulary to train")
-    parser.add_argument("--save", type=str, default="tokenizer.json", help="Filename to save the tokenizer")
+    parser.add_argument("--samples", type=int, default=1_000, help="Number of FineWeb samples to use for training")
+    parser.add_argument("--vocab-size", type=int, default=50257, help="Size of the vocabulary to train")
+    parser.add_argument("--save", type=str, default="custom_tokenizer.json", help="Filename to save the tokenizer")
     parser.add_argument("--download-dir", type=str, default="fineweb_temp", help="Directory for temporary download files")
     parser.add_argument("--delete_dataset", action="store_true", help="Delete downloaded data after training")
     parser.add_argument("--visualise", action="store_true", help="Visualization mode during training")
