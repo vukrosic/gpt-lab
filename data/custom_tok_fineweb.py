@@ -26,6 +26,7 @@ from datasets import load_dataset
 from tqdm import tqdm
 import argparse
 import numpy as np
+from tqdm import tqdm
 
 def write_datafile(filename, toks):
     """ 
@@ -55,36 +56,50 @@ def write_datafile(filename, toks):
 # ------------------------------------------
 
 parser = argparse.ArgumentParser(description="FineWeb dataset preprocessing")
-parser.add_argument("-v", "--version", type=str, default="10B", help="Which version of fineweb to use 10B|100B")
+parser.add_argument("-v", "--version", type=str, default="10Bedu", help="Which version of fineweb to use? 10B|100B|10Bedu|100Bedu")
 parser.add_argument("-s", "--shard_size", type=int, default=10**8, help="Size of each shard in tokens")
-parser.add_argument("--vsize", type=int, default=50257, help="Size of the vocabulary to train")
 parser.add_argument("--tokenizer", type=str, default="custom_tokenizer.json", help="Filename of custom tokenizer (json)")
+parser.add_argument("--max_docs", type=int, default=None, help="Maximum number of documents to process")
+parser.add_argument("--max_shards", type=int, default=None, help="Maximum number of shards to create")
 args = parser.parse_args()
 
 # FineWeb has a few possible subsamples available
 assert args.version in ["10B", "100B", "10Bedu"], "version must be one of 10B, 100B, or 10Bedu"
 if args.version == "10B":
+    hug_name = "HuggingFaceFW/fineweb"
     local_dir = "fineweb10B"
     remote_name = "sample-10BT"
 elif args.version == "100B":
+    hug_name = "HuggingFaceFW/fineweb"
     local_dir = "fineweb100B"
     remote_name = "sample-100BT"
 elif args.version == "10Bedu":
-    print('edu not yet supported. downloading regular 10B')
-    local_dir = "fineweb10B"
-    remote_name = "sample-10BT" # TODO find correct name for edu 10B
+    hug_name = "HuggingFaceFW/fineweb-edu"
+    local_dir = "finewebedu10B"
+    remote_name = "sample-10BT"
+elif args.version == "100Bedu":
+    hug_name = "HuggingFaceFW/fineweb-edu"
+    local_dir = "finewebedu100B"
+    remote_name = "sample-100BT"
 
 # create the cache the local directory if it doesn't exist yet
 DATA_CACHE_DIR = os.path.join(os.path.dirname(__file__), local_dir)
 os.makedirs(DATA_CACHE_DIR, exist_ok=True)
 
 # download the dataset
-fw = load_dataset("HuggingFaceFW/fineweb", name=remote_name, split="train")
+fw = load_dataset(hug_name, name=remote_name, split="train", streaming=True)
+
+# Select a subset of documents if max_docs is specified
+if args.max_docs is not None:
+    print(f"Using only the first {args.max_docs} documents")
+    fw = fw.take(args.max_docs)
 
 # Load the tokenizer configuration from the JSON file
 with open(args.tokenizer, 'r') as f:
     tokenizer_config = json.load(f)
 # Initialize the tokenizer with the loaded configuration
+print(type(tokenizer_config['pat_str']))
+print(type(tokenizer_config['mergeable_ranks']))
 enc = tiktoken.Encoding(
     name="custom",
     pat_str=tokenizer_config['pat_str'],
@@ -104,14 +119,14 @@ def tokenize(doc):
     return tokens_np_uint16
 
 # tokenize all documents and write output shards, each of shard_size tokens (last shard has remainder)
-nprocs = max(1, os.cpu_count() - 2) # don't hog the entire system
+nprocs = max(1, os.cpu_count() - 4)#2) # don't hog the entire system
 with mp.Pool(nprocs) as pool:
     shard_index = 0
     # preallocate buffer to hold current shard
     all_tokens_np = np.empty((args.shard_size,), dtype=np.uint16)
     token_count = 0
     progress_bar = None
-    for tokens in pool.imap(tokenize, fw, chunksize=16):
+    for tokens in tqdm(pool.imap(tokenize, fw, chunksize=16)):
 
         # is there enough space in the current shard for the new tokens?
         if token_count + len(tokens) < args.shard_size:
@@ -132,13 +147,19 @@ with mp.Pool(nprocs) as pool:
             all_tokens_np[token_count:token_count+remainder] = tokens[:remainder]
             write_datafile(filename, all_tokens_np)
             shard_index += 1
+            
+            # Stop if we've reached the maximum number of shards
+            if args.max_shards is not None and shard_index >= args.max_shards:
+                print(f"Reached maximum number of shards ({args.max_shards}). Stopping.")
+                break
+                
             progress_bar = None
             # populate the next shard with the leftovers of the current doc
             all_tokens_np[0:len(tokens)-remainder] = tokens[remainder:]
             token_count = len(tokens)-remainder
 
-    # write any remaining tokens as the last shard
-    if token_count != 0:
+    # write any remaining tokens as the last shard if we haven't reached max_shards
+    if token_count != 0 and (args.max_shards is None or shard_index < args.max_shards):
         split = "val" if shard_index == 0 else "train"
         filename = os.path.join(DATA_CACHE_DIR, f"fineweb_{split}_{shard_index:06d}.bin")
         write_datafile(filename, all_tokens_np[:token_count])
