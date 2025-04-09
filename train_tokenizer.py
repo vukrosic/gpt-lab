@@ -14,8 +14,39 @@ from datasets import load_dataset
 from tqdm import tqdm
 import pickle
 from itertools import chain
+
 import torch
-device = "cuda" if torch.cuda.is_available() else "cpu"
+import torch.distributed as dist
+#device = "cuda" if torch.cuda.is_available() else "cpu"
+# Check if environment variables are set by torchrun, otherwise default to single GPU
+if "RANK" in os.environ and "WORLD_SIZE" in os.environ and "LOCAL_RANK" in os.environ:
+    # Multi-GPU setup with torchrun
+    rank = int(os.environ["RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+    local_rank = int(os.environ["LOCAL_RANK"])
+else:
+    # Single GPU setup
+    rank = 0
+    world_size = 1
+    local_rank = 0
+    os.environ["RANK"] = str(rank)
+    os.environ["WORLD_SIZE"] = str(world_size)
+    os.environ["LOCAL_RANK"] = str(local_rank)
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["MASTER_PORT"] = "29500"
+print(f"Running with {world_size} GPU(s)")
+if world_size == 1:
+    print("To run with multiple GPUs, use `torchrun --nproc_per_node=N train_tokenizer.py`")
+assert torch.cuda.is_available()
+device = torch.device("cuda", local_rank)
+torch.cuda.set_device(device)
+
+# Initialize distributed process group if using multiple GPUs
+if world_size > 1:
+    dist.init_process_group(backend="nccl", device_id=device)
+    dist.barrier()
+master_process = (rank == 0)  # this process will do logging, checkpointing etc.
+
 
 class SimpleBytePairEncoding:
     def __init__(self, *, pat_str: str, mergeable_ranks: dict[bytes, int]) -> None:
@@ -155,24 +186,22 @@ def bpe_train(
     # Create a list to store numeric token IDs for tensor operations
     # Initially, these are just byte values (0-255)
     ids_lofl = [[ranks[b] for b in word] for word in words]
-    # Flatten the list of lists with -1 in between each sub-list
-    ids_list = list(chain.from_iterable(word + [-1] for word in ids_lofl))[:-1]
     # turn data into parseable tensor - using the token IDs instead of raw bytes
-    ids = torch.tensor(ids_list, dtype=int_type, device=device)
+    ids = torch.tensor(
+        list(chain.from_iterable(word + [-1] for word in ids_lofl))[:-1], 
+        dtype=int_type, device=device)
         # shape (words_in_data * (avg_word_len + 1))\
     
-    if demo:
+    if master_process and demo:
         # Initialize demo text tokens outside the loop to track changes across iterations
         demo_text = (f"This is a test of our custom trained BPE tokenizer on FineWeb data.\n"
                     f"It should handle punctuation, numbers (like 42 and 3.14159), and special characters ($#@!) properly.\n"
                     f"Supercalifragilisticexpialidocious antidisestablishmentarianism!!!")
         demo_words = [[bytes([b]) for b in word.encode("utf-8")] for word in regex.findall(pat_str, demo_text)]
 
-    rank = 0
-    world_size = 1
-
+    progress_bar = tqdm(total=vocab_size - 256, unit="merges")
     # Now, use our data to figure out which merges we should make
-    for j in tqdm(range(256, vocab_size)):
+    for j in range(256, vocab_size):
         # find most common pair
         pairs = torch.stack((ids[:-1], ids[1:]), dim=0) # (2, words_in_data * (avg_word_len + 1))
         unique, counts = torch.unique(pairs, return_counts=True, dim=1)
@@ -184,18 +213,19 @@ def bpe_train(
         ### single GPU
         #pair_index = sort_idx[0] # shape (1)
         #best_pair = unique[:, pair_index].cpu().numpy() # (2)
-        ### multi-GPU (simulated for now)
-        pairs_idx = sort_idx[rank:rank+world_size] # shape (world_size)
+        ### multi-GPU 
+        pairs_idx = sort_idx[rank * world_size:(rank + 1) * world_size] # shape (world_size)
         most_common_pairs_local = unique[:, pairs_idx] # (2, world_size)
         counts_local = counts[pairs_idx] # (world_size)
-        most_common_pairs_global = torch.zeros((2,world_size ** 2), dtype=int_type, device=device)
-        counts_global = torch.zeros(world_size ** 2, dtype=int_type, device=device)
-        most_common_pairs_global[:, rank:rank+world_size] = most_common_pairs_local
-        counts_global[rank:rank+world_size] = counts_local
-        # TODO FOR HUMAN LATER: I will implement DDP so that we can sum across GPUs
-        # TODO FOR AI NOW: only consider the pairs with the most duplicates, sum their counts, and grab the most common pair
-        #pair_idx = torch.argmax(counts_global) # (1)
-        #best_pair = most_common_pairs_global[:, pair_idx].cpu().numpy() # (2)
+        most_common_pairs_global = torch.zeros((2,world_size ** 2), dtype=torch.float32, device=device)
+        counts_global = torch.zeros(world_size ** 2, dtype=torch.float32, device=device)
+        most_common_pairs_global[:, rank * world_size:(rank + 1) * world_size] = most_common_pairs_local.to(torch.float32)
+        counts_global[rank * world_size:(rank + 1) * world_size] = counts_local.to(torch.float32)
+        
+        if world_size > 1:
+            dist.all_reduce(most_common_pairs_global, op=dist.ReduceOp.SUM)
+            dist.all_reduce(counts_global, op=dist.ReduceOp.SUM)
+
         # First, get unique pairs and their counts from the combined data
         pairs_global = most_common_pairs_global.t()  # Shape: [world_size^2, 2]
         unique_pairs, inverse_indices = torch.unique(pairs_global, dim=0, return_inverse=True)
@@ -241,7 +271,7 @@ def bpe_train(
         keep_mask = (ids != -2)
         ids = ids[keep_mask]
 
-        if demo:
+        if demo and master_process:
             # Also apply the same merge to our demo text
             demo_words = slow_merge(demo_words, tuple(best_bytes), token_bytes)
 
@@ -253,6 +283,9 @@ def bpe_train(
                 demo_tokens = [token for word in demo_words for token in word]
                 visualise_tokens(demo_tokens)
                 print("\n")
+
+        if master_process:
+            progress_bar.update(1)
 
     return ranks
 
@@ -277,17 +310,7 @@ def visualise_tokens(token_values: list[bytes]) -> None:
     print("\u001b[0m")
 
 
-def fetch_fineweb_data(max_chars=2**22, show_stats=True):
-    """
-    Download a small portion of the FineWeb dataset for tokenizer training
-    
-    Args:
-        max_chars: 
-        show_stats: Whether to display statistics about the downloaded data
-        
-    Returns:
-        The concatenated text of all documents
-    """
+def fetch_fineweb_data(max_chars: int = 2**22):
     # Use the 10B version of FineWeb; not edu since the former should have more diverse tokens
     dataset = load_dataset("HuggingFaceFW/fineweb", 
                            name="sample-10BT", 
@@ -297,7 +320,9 @@ def fetch_fineweb_data(max_chars=2**22, show_stats=True):
     text_data = []
     doc_lengths = []
     tot_len = 0
-    for item in dataset:
+    for i, item in enumerate(dataset):
+        if i % world_size != rank:
+            continue
         if tot_len >= max_chars:
             break
         text_data.append(item["text"])
@@ -305,8 +330,8 @@ def fetch_fineweb_data(max_chars=2**22, show_stats=True):
         tot_len += len(item["text"])
     
     # Show statistics if requested
-    if show_stats:
-        print("\nDataset Statistics:")
+    if rank == 0:
+        print(f"\nDataset Statistics for GPU {rank}:")
         print(f"Total documents: {len(text_data)}")
         print(f"Total characters: {sum(doc_lengths):,}")
         print(f"Average document length: {np.mean(doc_lengths):.1f} characters")
@@ -338,9 +363,9 @@ def train_simple_encoding(sample_size: int, vocab_size: int, demo: bool = False)
         r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
     )
     enc = SimpleBytePairEncoding.train(data, vocab_size=vocab_size, pat_str=gpt4_pattern, demo=demo)
-
+    
     # Test the tokenizer with a simple example
-    test_str = "hello world"
+    test_str = f"hello world rank={rank}"
     tokens = enc.encode(test_str)
     # Verify encoding-decoding roundtrips correctly
     decoded = enc.decode(tokens)
@@ -362,12 +387,12 @@ def save_tokenizer(enc, filename):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a custom BPE tokenizer")
-    parser.add_argument("-n", "--samples", type=int, default=2**22, help="Maximum number of text characters to use for training")
-    parser.add_argument("-v", "--vocabsize", type=int, default=50256, help="Size of the vocabulary to train (default 50256; one less than GPT2)")
+    parser.add_argument("-n", "--samples", type=int, default=2**27, help="Maximum number of text characters to use PER GPU for training")
+    parser.add_argument("-v", "--vocabsize", type=int, default=50256, help="Size of the vocabulary to train (default 50256; same as GPT2 minus <|endoftext|>)")
     parser.add_argument("-f", "--savename", type=str, default="custom_tokenizer", help="Filename to save the tokenizer (no extension)")
     parser.add_argument("--demo", action="store_true", default=False, help="Visualize tokenization during training")
     args = parser.parse_args()
-    
+
     # Train the tokenizer
     enc = train_simple_encoding(
         sample_size=args.samples,
@@ -376,5 +401,6 @@ if __name__ == "__main__":
     )
     
     # Save the tokenizer
-    save_tokenizer(enc, filename=args.savename)
+    if master_process:
+        save_tokenizer(enc, filename=args.savename)
     
