@@ -183,7 +183,7 @@ def bpe_train(
         counts, sort_idx = torch.sort(counts, descending=True)
         ### single GPU
         #pair_index = sort_idx[0] # shape (1)
-        #most_common_pair = unique[:, pair_index].cpu().numpy() # (2)
+        #best_pair = unique[:, pair_index].cpu().numpy() # (2)
         ### multi-GPU (simulated for now)
         pairs_idx = sort_idx[rank:rank+world_size] # shape (world_size)
         most_common_pairs_local = unique[:, pairs_idx] # (2, world_size)
@@ -192,29 +192,50 @@ def bpe_train(
         counts_global = torch.zeros(world_size ** 2, dtype=int_type, device=device)
         most_common_pairs_global[:, rank:rank+world_size] = most_common_pairs_local
         counts_global[rank:rank+world_size] = counts_local
-        if j == 256:
-            print(most_common_pairs_global)
-            print(counts_global)
-        # TODO sum across GPUs
-        # TODO average any duplicates
-        pair_idx = torch.argmax(counts_global) # (1)
-        most_common_pair = most_common_pairs_global[:, pair_idx].cpu().numpy() # (2)
+        # TODO FOR HUMAN LATER: I will implement DDP so that we can sum across GPUs
+        # TODO FOR AI NOW: only consider the pairs with the most duplicates, sum their counts, and grab the most common pair
+        #pair_idx = torch.argmax(counts_global) # (1)
+        #best_pair = most_common_pairs_global[:, pair_idx].cpu().numpy() # (2)
+        # First, get unique pairs and their counts from the combined data
+        pairs_global = most_common_pairs_global.t()  # Shape: [world_size^2, 2]
+        unique_pairs, inverse_indices = torch.unique(pairs_global, dim=0, return_inverse=True)
+
+        # Sum the counts for each unique pair
+        sum_counts = torch.zeros(unique_pairs.size(0), dtype=torch.float, device=device)
+        sum_counts.scatter_add_(0, inverse_indices, counts_global.float())
+
+        # Count occurrences of each unique pair
+        pair_occurrences = torch.bincount(inverse_indices)
+
+        # Find the maximum occurrence count
+        max_occurrence = torch.max(pair_occurrences)
+
+        # Create a mask for pairs with the maximum occurrence count
+        max_occurrence_mask = (pair_occurrences == max_occurrence)
+
+        # Filter to only consider pairs with the maximum occurrence count
+        filtered_sum_counts = sum_counts[max_occurrence_mask]
+        filtered_unique_pairs = unique_pairs[max_occurrence_mask]
+
+        # Find the pair with the largest count among the filtered pairs
+        max_index = torch.argmax(filtered_sum_counts)
+        best_pair = filtered_unique_pairs[max_index].cpu().numpy() # Shape: (2)
 
         # Map token IDs back to the corresponding byte sequences
         # Using the dictionary in reverse to get the bytes corresponding to these IDs
-        most_common_bytes = [None, None]
+        best_bytes = [None, None]
         for bytes_token, id_token in ranks.items():
-            if id_token == most_common_pair[0]:
-                most_common_bytes[0] = bytes_token
-            if id_token == most_common_pair[1]:
-                most_common_bytes[1] = bytes_token
-        token_bytes = most_common_bytes[0] + most_common_bytes[1]
+            if id_token == best_pair[0]:
+                best_bytes[0] = bytes_token
+            if id_token == best_pair[1]:
+                best_bytes[1] = bytes_token
+        token_bytes = best_bytes[0] + best_bytes[1]
         new_token_id = len(ranks)
         # Add the new token!
         ranks[token_bytes] = new_token_id
 
         # Now merge that most common pair in all the words
-        pair_mask = (pairs[0] == most_common_pair[0]) & (pairs[1] == most_common_pair[1]) 
+        pair_mask = (pairs[0] == best_pair[0]) & (pairs[1] == best_pair[1]) 
         ids[:-1][pair_mask] = new_token_id
         ids[1:][pair_mask] = -2
         keep_mask = (ids != -2)
@@ -222,13 +243,12 @@ def bpe_train(
 
         if demo:
             # Also apply the same merge to our demo text
-            demo_words = slow_merge(demo_words, tuple(most_common_bytes), token_bytes)
+            demo_words = slow_merge(demo_words, tuple(best_bytes), token_bytes)
 
             # See the intermediate merges play out!
             if j % 500 == 0 or j in [256, vocab_size - 1]:
-                print(f"The most common pair {most_common_pair[0]} + {most_common_pair[1]} "
-                        #f"has a count of {counts[pair_index]}\n"
-                        f"So we made {token_bytes} our {len(ranks)}th token")
+                print(f"The most common pair {best_pair[0]} + {best_pair[1]} "
+                        f"which makes {token_bytes} our {len(ranks)}th token")
                 # Flatten the demo words into a single list of tokens for visualization
                 demo_tokens = [token for word in demo_words for token in word]
                 visualise_tokens(demo_tokens)
