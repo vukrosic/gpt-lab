@@ -155,13 +155,11 @@ def bpe_train(
     # Initially, these are just byte values (0-255)
     ids_list = [[ranks[b] for b in word] for word in words]
     # turn data into parseable tensor - using the token IDs instead of raw bytes
-    ids = [torch.cat(
-        (torch.tensor(word, dtype=int_type, device=device),
-        -1 * torch.ones((m - len(word) + 1,), dtype=int_type, device=device)),
-        dim = 0) for word in ids_list]
-    ids = torch.cat(tuple(word.unsqueeze(0) for word in ids), dim=1).squeeze(0)
-        # shape (words_in_data * longest_word_len)
-
+    ids = torch.cat(
+        (torch.tensor(word + [-1], dtype=int_type, device=device) 
+        for word in ids_list), 
+        dim=0) # shape (words_in_data * (avg_word_len + 1))
+    
     if visualise:
         # Initialize demo text tokens outside the loop to track changes across iterations
         demo_text = (f"This is a test of our custom trained BPE tokenizer on FineWeb data.\n"
@@ -172,9 +170,9 @@ def bpe_train(
     # Now, use our data to figure out which merges we should make
     for j in tqdm(range(256, vocab_size)):
         # find most common pair
-        pairs = torch.stack((ids[:-1], ids[1:]), dim=0) # (2, words_in_data * longest_word_len)
+        pairs = torch.stack((ids[:-1], ids[1:]), dim=0) # (2, words_in_data * (avg_word_len + 1))
         unique, counts = torch.unique(pairs, return_counts=True, dim=1)
-            # shapes (2, words_in_data * longest_word_len) and (words_in_data * longest_word_len)
+            # shapes (2, words_in_data * longest_word_len) and (words_in_data * (avg_word_len + 1))
         valid_mask = torch.all(unique != -1, dim=0)
         valid_counts = torch.where(valid_mask, counts, 0)
         pair_index = torch.argmax(valid_counts) # shape (1)

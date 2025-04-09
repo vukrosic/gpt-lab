@@ -32,21 +32,26 @@ todos:
 - [x] test more than two GPUs to confirm I didn't break anything
 - [x] implement ability to run on a single GPU without a hacky debug config
 - [x] eliminate redundancy in dataset download scripts
-- [x] setup for custom tokenizer into `raw_fineweb.py` that replicates GPT2 for now but will be easy to edit later
+- [x] setup for custom tokenizer into `train_tokenizer.py` that roughly replicates GPT2 for now but will be easy to edit later
     - [x] train
     - [x] train on GPU
-    - [x] confirm cokmpatibility with `raw_fineweb.py`
-    - [x] make `raw_fineweb.py` able to do just one shard
-    - [ ] confirm compatibility with `train_gpt.py
+    - [x] confirm cokmpatibility with `fineweb.py`
+    - [x] make `fineweb.py` able to do just one shard
+    - [x] confirm compatibility with `train_gpt.py
+    - [ ] speed up w/ torch.compile
+    - [ ] setup for multi-gpu training
 - [ ] implement [[DAGSeq2DAGSeq]] to test & learn more about how this repo should work
-- [ ] switch from gpt2 tokenizer default to whatever newest tokenizer has easily available pre-tokenized fineweb data available for download
-- [ ] upgrade from fineweb to fineweb2 or similar
 - [ ] calc runtime of 10B? tokens on 8xH100 & therefore cost of doing research
 - [ ] add batched inference
     - [ ] use to speed up hellaswag
 - [ ] switch experiment output from single text file to folder with csv file of loss, model weights, etc
     - [ ] model weights should upload to huggingface or something and not the github repo. or maybe just don't bother saving them?
 - [ ] excessively comment all the Modded-NanoGPT specific architecture edits to explain what's happening
+- [ ] post-training?
+- [ ] more benchmarks? api calls to a smarter LLM for mass comparisons?
+- [ ] write latex preprint skeleton
+    - [ ] moddedGPT architecture specifics in an appendix
+    - [ ] auto-generated loss curves & benchmark tables
 
 # Modded-NanoGPT (ORIGINAL README)
 
