@@ -168,21 +168,37 @@ def bpe_train(
                     f"Supercalifragilisticexpialidocious antidisestablishmentarianism!!!")
         demo_words = [[bytes([b]) for b in word.encode("utf-8")] for word in regex.findall(pat_str, demo_text)]
 
+    rank = 0
+    world_size = 1
+
     # Now, use our data to figure out which merges we should make
     for j in tqdm(range(256, vocab_size)):
         # find most common pair
         pairs = torch.stack((ids[:-1], ids[1:]), dim=0) # (2, words_in_data * (avg_word_len + 1))
         unique, counts = torch.unique(pairs, return_counts=True, dim=1)
             # shapes (2, words_in_data * (avg_word_len + 1)) and (words_in_data * (avg_word_len + 1))
-        #if j == 256: print(counts[-100:])
         valid_mask = torch.all(unique != -1, dim=0)
-        valid_counts = torch.where(valid_mask, counts, 0)
-        #unique = unique[:, valid_mask]
-        #counts = counts[valid_mask]
-        #if j == 256: print(valid_counts[-100:])
-        pair_index = torch.argmax(valid_counts) # shape (1)
-        most_common_pair = unique[:, pair_index].cpu().numpy() # (2)
-        #most_common_pair = unique[:, -1].cpu().numpy() # (2)
+        unique = unique[:, valid_mask]
+        counts = counts[valid_mask]
+        counts, sort_idx = torch.sort(counts, descending=True)
+        ### single GPU
+        #pair_index = sort_idx[0] # shape (1)
+        #most_common_pair = unique[:, pair_index].cpu().numpy() # (2)
+        ### multi-GPU (simulated for now)
+        pairs_idx = sort_idx[rank:rank+world_size] # shape (world_size)
+        most_common_pairs_local = unique[:, pairs_idx] # (2, world_size)
+        counts_local = counts[pairs_idx] # (world_size)
+        most_common_pairs_global = torch.zeros((2,world_size ** 2), dtype=int_type, device=device)
+        counts_global = torch.zeros(world_size ** 2, dtype=int_type, device=device)
+        most_common_pairs_global[:, rank:rank+world_size] = most_common_pairs_local
+        counts_global[rank:rank+world_size] = counts_local
+        if j == 256:
+            print(most_common_pairs_global)
+            print(counts_global)
+        # TODO sum across GPUs
+        # TODO average any duplicates
+        pair_idx = torch.argmax(counts_global) # (1)
+        most_common_pair = most_common_pairs_global[:, pair_idx].cpu().numpy() # (2)
 
         # Map token IDs back to the corresponding byte sequences
         # Using the dictionary in reverse to get the bytes corresponding to these IDs
@@ -211,8 +227,7 @@ def bpe_train(
             # See the intermediate merges play out!
             if j % 500 == 0 or j in [256, vocab_size - 1]:
                 print(f"The most common pair {most_common_pair[0]} + {most_common_pair[1]} "
-                        #f"has a count of {valid_counts[pair_index]}\n"
-                        f"has a count of {counts[-1]}\n"
+                        #f"has a count of {counts[pair_index]}\n"
                         f"So we made {token_bytes} our {len(ranks)}th token")
                 # Flatten the demo words into a single list of tokens for visualization
                 demo_tokens = [token for word in demo_words for token in word]
