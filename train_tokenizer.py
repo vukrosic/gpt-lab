@@ -27,7 +27,7 @@ class SimpleBytePairEncoding:
         self._decoder = {token: token_bytes for token_bytes, token in mergeable_ranks.items()}
         self._pat = regex.compile(pat_str)
 
-    def encode(self, text: str, visualise: bool = False) -> list[int]:
+    def encode(self, text: str, demo: bool = False) -> list[int]:
         """Encodes a string into tokens.
 
         >>> enc.encode("hello world")
@@ -39,7 +39,7 @@ class SimpleBytePairEncoding:
         for word in words:
             # Turn each word into tokens, using the byte pair encoding algorithm
             word_bytes = word.encode("utf-8")
-            word_tokens = bpe_encode(self.mergeable_ranks, word_bytes, visualise=visualise)
+            word_tokens = bpe_encode(self.mergeable_ranks, word_bytes, demo=demo)
             tokens.extend(word_tokens)
         return tokens
 
@@ -73,9 +73,9 @@ class SimpleBytePairEncoding:
         return [self._decoder[token] for token in tokens]
 
     @staticmethod
-    def train(training_data: str, vocab_size: int, pat_str: str, visualise: bool = False):
+    def train(training_data: str, vocab_size: int, pat_str: str, demo: bool = False):
         """Train a BPE tokeniser on some data!"""
-        mergeable_ranks = bpe_train(data=training_data, vocab_size=vocab_size, pat_str=pat_str, visualise=visualise)
+        mergeable_ranks = bpe_train(data=training_data, vocab_size=vocab_size, pat_str=pat_str, demo=demo)
         return SimpleBytePairEncoding(pat_str=pat_str, mergeable_ranks=mergeable_ranks)
 
     @staticmethod
@@ -88,12 +88,12 @@ class SimpleBytePairEncoding:
 
 
 def bpe_encode(
-    mergeable_ranks: dict[bytes, int], input: bytes, visualise: bool = False
+    mergeable_ranks: dict[bytes, int], input: bytes, demo: bool = False
 ) -> list[int]:
     parts = [bytes([b]) for b in input]
     while True:
         # See the intermediate merges play out!
-        if visualise: visualise_tokens(parts)
+        if demo: demo_tokens(parts)
 
         # Iterate over all pairs and find the pair we want to merge the most
         min_idx = None
@@ -136,7 +136,7 @@ def slow_merge(words, most_common_pair, token_bytes):
 
 
 def bpe_train(
-    data: str, vocab_size: int, pat_str: str, visualise: bool = False
+    data: str, vocab_size: int, pat_str: str, demo: bool = False
 ) -> dict[bytes, int]:
     # First, add tokens for each individual byte value
     if vocab_size < 2**8:
@@ -156,11 +156,11 @@ def bpe_train(
     ids_list = [[ranks[b] for b in word] for word in words]
     # turn data into parseable tensor - using the token IDs instead of raw bytes
     ids = torch.cat(
-        (torch.tensor(word + [-1], dtype=int_type, device=device) 
+        tuple(torch.tensor(word + [-1], dtype=int_type, device=device) 
         for word in ids_list), 
         dim=0) # shape (words_in_data * (avg_word_len + 1))
     
-    if visualise:
+    if demo:
         # Initialize demo text tokens outside the loop to track changes across iterations
         demo_text = (f"This is a test of our custom trained BPE tokenizer on FineWeb data.\n"
                     f"It should handle punctuation, numbers (like 42 and 3.14159), and special characters ($#@!) properly.\n"
@@ -198,7 +198,7 @@ def bpe_train(
         keep_mask = (ids != -2)
         ids = ids[keep_mask]
 
-        if visualise:
+        if demo:
             # Also apply the same merge to our demo text
             demo_words = slow_merge(demo_words, tuple(most_common_bytes), token_bytes)
 
@@ -218,7 +218,7 @@ def bpe_train(
 def visualise_tokens(token_values: list[bytes]) -> None:
     background = [f"\u001b[48;5;{i}m" for i in [167, 179, 185, 77, 80, 68, 134]]
     # If token boundaries do not occur at unicode character boundaries, it's unclear how best to
-    # visualise the token. Here, we'll just use the unicode replacement character to represent some
+    # demo the token. Here, we'll just use the unicode replacement character to represent some
     # fraction of a character.
     unicode_token_values = [x.decode("utf-8", errors="replace") for x in token_values]
 
@@ -235,12 +235,12 @@ def visualise_tokens(token_values: list[bytes]) -> None:
     print("\u001b[0m")
 
 
-def fetch_fineweb_data(max_samples=100, show_stats=True):
+def fetch_fineweb_data(max_chars=2**22, show_stats=True):
     """
     Download a small portion of the FineWeb dataset for tokenizer training
     
     Args:
-        max_samples: Number of documents to download
+        max_chars: 
         show_stats: Whether to display statistics about the downloaded data
         
     Returns:
@@ -250,17 +250,17 @@ def fetch_fineweb_data(max_samples=100, show_stats=True):
     dataset = load_dataset("HuggingFaceFW/fineweb", 
                            name="sample-10BT", 
                            split="train", 
-                          streaming=True)
+                           streaming=True)
     
-    # Take only a tiny portion for training
     text_data = []
     doc_lengths = []
-    
-    for i, item in enumerate(tqdm(dataset, total=max_samples, desc="Downloading documents")):
-        if i >= max_samples:
+    tot_len = 0
+    for item in dataset:
+        if tot_len >= max_chars:
             break
         text_data.append(item["text"])
         doc_lengths.append(len(item["text"]))
+        tot_len += len(item["text"])
     
     # Show statistics if requested
     if show_stats:
@@ -277,25 +277,25 @@ def fetch_fineweb_data(max_samples=100, show_stats=True):
     return "\n".join(text_data)
 
 
-def train_simple_encoding(sample_size: int, vocab_size: int, visualise: bool = False):
+def train_simple_encoding(sample_size: int, vocab_size: int, demo: bool = False):
     """
     Train a custom BPE tokenizer using FineWeb data.
     
     Args:
-        sample_size: Number of FineWeb samples to use
+        sample_size: maximum number of characters to include in data
         vocab_size: Size of the vocabulary to train
-        visualise: Visualization mode for BPE training process
+        demo: Visualization mode for BPE training process
     
     Returns:
         The trained tokenizer
     """
-    data = fetch_fineweb_data(max_samples=sample_size)
+    data = fetch_fineweb_data(max_chars=sample_size)
 
     #gpt2_pattern = (r"""'s|'t|'re|'ve|'m|'ll|'d| ?[\p{L}]+| ?[\p{N}]+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
     gpt4_pattern = (
         r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
     )
-    enc = SimpleBytePairEncoding.train(data, vocab_size=vocab_size, pat_str=gpt4_pattern, visualise=visualise)
+    enc = SimpleBytePairEncoding.train(data, vocab_size=vocab_size, pat_str=gpt4_pattern, demo=demo)
 
     # Test the tokenizer with a simple example
     test_str = "hello world"
@@ -320,17 +320,17 @@ def save_tokenizer(enc, filename):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a custom BPE tokenizer")
-    parser.add_argument("-n", "--samples", type=int, default=10_000, help="Number of FineWeb documents to use for training")
+    parser.add_argument("-n", "--samples", type=int, default=2**22, help="Maximum number of text characters to use for training")
     parser.add_argument("-v", "--vocabsize", type=int, default=50256, help="Size of the vocabulary to train (default 50256; one less than GPT2)")
     parser.add_argument("-f", "--savename", type=str, default="custom_tokenizer", help="Filename to save the tokenizer (no extension)")
-    parser.add_argument("--visualise", action="store_true", default=False, help="Visualization mode during training")
+    parser.add_argument("--demo", action="store_true", default=False, help="Visualize tokenization during training")
     args = parser.parse_args()
     
     # Train the tokenizer
     enc = train_simple_encoding(
         sample_size=args.samples,
         vocab_size=args.vocabsize,
-        visualise=args.visualise
+        demo=args.demo
     )
     
     # Save the tokenizer
