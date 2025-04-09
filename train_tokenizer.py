@@ -13,6 +13,7 @@ import numpy as np
 from datasets import load_dataset
 from tqdm import tqdm
 import pickle
+from itertools import chain
 import torch
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -153,12 +154,12 @@ def bpe_train(
     m = max([len(word) for word in words])
     # Create a list to store numeric token IDs for tensor operations
     # Initially, these are just byte values (0-255)
-    ids_list = [[ranks[b] for b in word] for word in words]
+    ids_lofl = [[ranks[b] for b in word] for word in words]
+    # Flatten the list of lists with -1 in between each sub-list
+    ids_list = list(chain.from_iterable(word + [-1] for word in ids_lofl))[:-1]
     # turn data into parseable tensor - using the token IDs instead of raw bytes
-    ids = torch.cat(
-        tuple(torch.tensor(word + [-1], dtype=int_type, device=device) 
-        for word in ids_list), 
-        dim=0) # shape (words_in_data * (avg_word_len + 1))
+    ids = torch.tensor(ids_list, dtype=int_type, device=device)
+        # shape (words_in_data * (avg_word_len + 1))\
     
     if demo:
         # Initialize demo text tokens outside the loop to track changes across iterations
@@ -172,11 +173,16 @@ def bpe_train(
         # find most common pair
         pairs = torch.stack((ids[:-1], ids[1:]), dim=0) # (2, words_in_data * (avg_word_len + 1))
         unique, counts = torch.unique(pairs, return_counts=True, dim=1)
-            # shapes (2, words_in_data * longest_word_len) and (words_in_data * (avg_word_len + 1))
+            # shapes (2, words_in_data * (avg_word_len + 1)) and (words_in_data * (avg_word_len + 1))
+        #if j == 256: print(counts[-100:])
         valid_mask = torch.all(unique != -1, dim=0)
         valid_counts = torch.where(valid_mask, counts, 0)
+        #unique = unique[:, valid_mask]
+        #counts = counts[valid_mask]
+        #if j == 256: print(valid_counts[-100:])
         pair_index = torch.argmax(valid_counts) # shape (1)
         most_common_pair = unique[:, pair_index].cpu().numpy() # (2)
+        #most_common_pair = unique[:, -1].cpu().numpy() # (2)
 
         # Map token IDs back to the corresponding byte sequences
         # Using the dictionary in reverse to get the bytes corresponding to these IDs
@@ -205,7 +211,8 @@ def bpe_train(
             # See the intermediate merges play out!
             if j % 500 == 0 or j in [256, vocab_size - 1]:
                 print(f"The most common pair {most_common_pair[0]} + {most_common_pair[1]} "
-                        f"has a count of {valid_counts[pair_index]}\n"
+                        #f"has a count of {valid_counts[pair_index]}\n"
+                        f"has a count of {counts[-1]}\n"
                         f"So we made {token_bytes} our {len(ranks)}th token")
                 # Flatten the demo words into a single list of tokens for visualization
                 demo_tokens = [token for word in demo_words for token in word]
