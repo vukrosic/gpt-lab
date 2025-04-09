@@ -75,7 +75,7 @@ class SimpleBytePairEncoding:
     @staticmethod
     def train(training_data: str, vocab_size: int, pat_str: str, visualise: bool = False):
         """Train a BPE tokeniser on some data!"""
-        mergeable_ranks = bpe_train(data=training_data, vocab_size=vocab_size-1, pat_str=pat_str, visualise=visualise)
+        mergeable_ranks = bpe_train(data=training_data, vocab_size=vocab_size, pat_str=pat_str, visualise=visualise)
         return SimpleBytePairEncoding(pat_str=pat_str, mergeable_ranks=mergeable_ranks)
 
     @staticmethod
@@ -114,6 +114,7 @@ def bpe_encode(
 
     tokens = [mergeable_ranks[part] for part in parts]
     return tokens
+
 
 def slow_merge(words, most_common_pair, token_bytes):
     new_words = []
@@ -169,7 +170,7 @@ def bpe_train(
         demo_words = [[bytes([b]) for b in word.encode("utf-8")] for word in regex.findall(pat_str, demo_text)]
 
     # Now, use our data to figure out which merges we should make
-    for j in tqdm(range(257, vocab_size)):
+    for j in tqdm(range(256, vocab_size)):
         # find most common pair
         pairs = torch.stack((ids[:-1], ids[1:]), dim=0) # (2, words_in_data * longest_word_len)
         unique, counts = torch.unique(pairs, return_counts=True, dim=1)
@@ -204,7 +205,7 @@ def bpe_train(
             demo_words = slow_merge(demo_words, tuple(most_common_bytes), token_bytes)
 
             # See the intermediate merges play out!
-            if j % 500 == 0 or j in [257, vocab_size - 1]:
+            if j % 500 == 0 or j in [256, vocab_size - 1]:
                 print(f"The most common pair {most_common_pair[0]} + {most_common_pair[1]} "
                         f"has a count of {valid_counts[pair_index]}\n"
                         f"So we made {token_bytes} our {len(ranks)}th token")
@@ -278,21 +279,20 @@ def fetch_fineweb_data(max_samples=100, show_stats=True):
     return "\n".join(text_data)
 
 
-def train_simple_encoding(sample_size=100, vocab_size=600, visualise: bool = False):
+def train_simple_encoding(sample_size: int, vocab_size: int, visualise: bool = False):
     """
     Train a custom BPE tokenizer using FineWeb data.
     
     Args:
         sample_size: Number of FineWeb samples to use
         vocab_size: Size of the vocabulary to train
-        visualise: Visualization mode for BPE training process ("color", "simple", or None)
+        visualise: Visualization mode for BPE training process
     
     Returns:
         The trained tokenizer
     """
     data = fetch_fineweb_data(max_samples=sample_size)
 
-    # Train the tokenizer with the specified vocabulary size (one less to account for the special token)
     #gpt2_pattern = (r"""'s|'t|'re|'ve|'m|'ll|'d| ?[\p{L}]+| ?[\p{N}]+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
     gpt4_pattern = (
         r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
@@ -323,7 +323,7 @@ def save_tokenizer(enc, filename):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a custom BPE tokenizer")
     parser.add_argument("-n", "--samples", type=int, default=10_000, help="Number of FineWeb documents to use for training")
-    parser.add_argument("-v", "--vocabsize", type=int, default=50257, help="Size of the vocabulary to train")
+    parser.add_argument("-v", "--vocabsize", type=int, default=50256, help="Size of the vocabulary to train (default 50256; one less than GPT2)")
     parser.add_argument("-f", "--savename", type=str, default="custom_tokenizer", help="Filename to save the tokenizer (no extension)")
     parser.add_argument("--visualise", action="store_true", default=False, help="Visualization mode during training")
     args = parser.parse_args()

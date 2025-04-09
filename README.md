@@ -35,8 +35,8 @@ todos:
 - [x] setup for custom tokenizer into `raw_fineweb.py` that replicates GPT2 for now but will be easy to edit later
     - [x] train
     - [x] train on GPU
-    - [ ] confirm cokmpatibility with `raw_fineweb.py`
-    - [ ] make `raw_fineweb.py` able to do just one shard
+    - [x] confirm cokmpatibility with `raw_fineweb.py`
+    - [x] make `raw_fineweb.py` able to do just one shard
     - [ ] confirm compatibility with `train_gpt.py
 - [ ] implement [[DAGSeq2DAGSeq]] to test & learn more about how this repo should work
 - [ ] switch from gpt2 tokenizer default to whatever newest tokenizer has easily available pre-tokenized fineweb data available for download

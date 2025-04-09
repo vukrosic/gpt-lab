@@ -531,17 +531,17 @@ def distributed_data_generator(filename_pattern: str, batch_size: int, rank: int
 class Hyperparameters:
     model_name = "moddedGPT"
     # data
-    train_files = "data/fineweb*10B/fineweb*_train_*.bin" # input .bin to train on
-    val_files = "data/fineweb*10B/fineweb*_val_*.bin" # input .bin to eval validation loss on
-    val_tokens = 10485760 # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
-    train_seq_len = 8*1024 # FlexAttention sequence length - reduced from 48*1024 for GPUs w/ at least 8GB VRAM during testing
-    val_seq_len = 12*1024 # FlexAttention sequence length for validation - reduced from 4*64*1024
+    train_files = "fineweb*10B/fineweb*_train_*.bin" # input .bin to train on
+    val_files = "fineweb*10B/fineweb*_val_*.bin" # input .bin to eval validation loss on
+    val_tokens = 4096#10485760 # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
+    train_seq_len = 1024#8*1024 # FlexAttention sequence length - reduced from 48*1024 for GPUs w/ at least 8GB VRAM during testing
+    val_seq_len = 2048#12*1024 # FlexAttention sequence length for validation - reduced from 4*64*1024
     # optimization
     num_iterations = 20#_000 # number of iterations to run
     cooldown_frac = 0.4 # fraction of training spent cooling down the learning rate
     # architecture
     tokenizer = "custom_tokenizer.pkl" # any .pkl file
-    vocab_size = 300#50257
+    vocab_size = 1001#50257
     # model size - new parameters for GPUs w/ at least 8GB VRAM during testing
     num_layers = 6  # 124m param model should be 12
     num_heads = 6   # 124m param model should be 6
@@ -620,6 +620,38 @@ try:
         print0(f.read())
 except FileNotFoundError:
     print0("\n" + "="*100 + "\nhellaswag.py not found\n" + "="*100)
+
+# Load and log tokenizer dictionary
+if master_process:
+    try:
+        with open(args.tokenizer, 'rb') as f:
+            tokenizer_config = pickle.load(f)
+        print0("\n" + "="*100 + f"\nTokenizer Config ({args.tokenizer}):\n" + "="*100)
+        # Pretty print the dictionary for better readability in the log file
+        import pprint
+        tokenizer_str = pprint.pformat(tokenizer_config)
+        print0(tokenizer_str)
+        del tokenizer_config # Free up memory if not needed immediately
+    except FileNotFoundError:
+        print0(f"\n" + "="*100 + f"\nTokenizer file {args.tokenizer} not found\n" + "="*100)
+    except Exception as e:
+        print0(f"\n" + "="*100 + f"\nError loading tokenizer {args.tokenizer}: {e}\n" + "="*100)
+
+# Print train_tokenizer.py if it exists
+try:
+    with open("train_tokenizer.py", "r") as f:
+        print0("\n" + "="*100 + "\ntrain_tokenizer.py:\n" + "="*100)
+        print0(f.read())
+except FileNotFoundError:
+    print0("\n" + "="*100 + "\ntrain_tokenizer.py not found\n" + "="*100)
+
+# Print fineweb.py if it exists
+try:
+    with open("fineweb.py", "r") as f:
+        print0("\n" + "="*100 + "\nfineweb.py:\n" + "="*100)
+        print0(f.read())
+except FileNotFoundError:
+    print0("\n" + "="*100 + "\nfineweb.py not found\n" + "="*100)
 
 print0("="*100)
 
@@ -748,6 +780,7 @@ def sample_from_model(model, prompt, max_new_tokens=100, temperature=0.8, top_k=
             "<|endoftext|>": len(tokenizer_config['mergeable_ranks']),
         }
     )
+    print(len(tokenizer_config['mergeable_ranks']))
     encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
     decode = lambda l: enc.decode(l)
     
@@ -1037,7 +1070,7 @@ def evaluate_hellaswag(model, data_path, limit=1014):
         print0(f"Normalized accuracy: {num_correct_norm}/{num_total}={accuracy_norm:.4f} [95% CI: {ci_norm[0]:.3f}-{ci_norm[1]:.3f}]", console=True)
 
 # After training and sample generations, evaluate on HellaSwag
-hellaswag_path = "./data/hellaswag/hellaswag_val.jsonl" 
+hellaswag_path = "./hellaswag_val.jsonl" 
 # Check if the HellaSwag data file exists
 if os.path.exists(hellaswag_path):
     print0(f"Found HellaSwag dataset at {hellaswag_path}", console=True)

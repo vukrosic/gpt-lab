@@ -31,7 +31,7 @@ import requests
 from tqdm import tqdm
 
 # -----------------------------------------------------------------------------
-DATA_CACHE_DIR = os.path.join(os.path.dirname(__file__), "hellaswag")
+DATA_CACHE_DIR = os.path.dirname(__file__)
 
 def download_file(url: str, fname: str, chunk_size=1024):
     """Helper function to download a file from a given url"""
