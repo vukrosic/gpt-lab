@@ -1,12 +1,8 @@
 fineweb10B/
-data/fineweb10B/
 fineweb100B/
-data/fineweb100B/
 finewebedu10B/
-data/finewebedu10B/
-data/hellaswag/
+finewebedu100B/
+hellaswag/
 pylog124M/
 __pycache__/
-logs/
 venv/
-data/fineweb_temp/

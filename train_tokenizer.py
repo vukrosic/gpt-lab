@@ -27,7 +27,7 @@ class SimpleBytePairEncoding:
         self._decoder = {token: token_bytes for token_bytes, token in mergeable_ranks.items()}
         self._pat = regex.compile(pat_str)
 
-    def encode(self, text: str, visualise: str | None = None) -> list[int]:
+    def encode(self, text: str, visualise: bool = False) -> list[int]:
         """Encodes a string into tokens.
 
         >>> enc.encode("hello world")
@@ -88,7 +88,7 @@ class SimpleBytePairEncoding:
 
 
 def bpe_encode(
-    mergeable_ranks: dict[bytes, int], input: bytes, visualise: str | None = None
+    mergeable_ranks: dict[bytes, int], input: bytes, visualise: bool = False
 ) -> list[int]:
     parts = [bytes([b]) for b in input]
     while True:
@@ -163,8 +163,9 @@ def bpe_train(
 
     if visualise:
         # Initialize demo text tokens outside the loop to track changes across iterations
-        demo_text = (f"This is a test of our custom trained BPE tokenizer on FineWeb data."
-                    f" It should handle punctuation, numbers (like 42 and 3.14159), and special characters ($#@!) properly.")
+        demo_text = (f"This is a test of our custom trained BPE tokenizer on FineWeb data.\n"
+                    f"It should handle punctuation, numbers (like 42 and 3.14159), and special characters ($#@!) properly.\n"
+                    f"Supercalifragilisticexpialidocious antidisestablishmentarianism!!!")
         demo_words = [[bytes([b]) for b in word.encode("utf-8")] for word in regex.findall(pat_str, demo_text)]
 
     # Now, use our data to figure out which merges we should make
@@ -235,34 +236,22 @@ def visualise_tokens(token_values: list[bytes]) -> None:
     print("\u001b[0m")
 
 
-def fetch_fineweb_data(max_samples=100, download_dir="data/fineweb_temp", show_stats=True):
+def fetch_fineweb_data(max_samples=100, show_stats=True):
     """
     Download a small portion of the FineWeb dataset for tokenizer training
     
     Args:
         max_samples: Number of documents to download
-        download_dir: Directory to store downloaded data (will be created if needed)
         show_stats: Whether to display statistics about the downloaded data
         
     Returns:
         The concatenated text of all documents
     """
-    # Create download directory if it doesn't exist
-    os.makedirs(download_dir, exist_ok=True)
-    
-    # Check if data already exists (using cached data file as indicator)
-    # NOTE DOES NOT CHECK TO SEE IF CACHED DATA IS SIZE REQUESTED BY INPUT ARGS
-    data_cache_file = os.path.join(download_dir, "cached_data.txt")
-    if os.path.exists(data_cache_file):
-        print(f"Found existing data in {download_dir}. Using cached data."
-                f"\nWARMING: CACHED DATA MAY NOT BE SAME LENGTH AS INPUT ARGUMENT")
-        with open(data_cache_file, "r") as f:
-            return f.read()
-    
-    print(f"Downloading {max_samples} samples from the FineWeb dataset to {download_dir}...")
-    # Use the 10B version of FineWeb as it's smaller
-    dataset = load_dataset("HuggingFaceFW/fineweb", name="sample-10BT", split="train", 
-                          streaming=True)#, cache_dir=download_dir)
+    # Use the 10B version of FineWeb; not edu since the former should have more diverse tokens
+    dataset = load_dataset("HuggingFaceFW/fineweb", 
+                           name="sample-10BT", 
+                           split="train", 
+                          streaming=True)
     
     # Take only a tiny portion for training
     text_data = []
@@ -286,52 +275,29 @@ def fetch_fineweb_data(max_samples=100, download_dir="data/fineweb_temp", show_s
         print(f"Standard deviation: {np.std(doc_lengths):.1f} characters")
     
     # Join all text data into a single string
-    joined_data = "\n".join(text_data)
-    
-    # Cache the data for future use
-    with open(data_cache_file, "w") as f:
-        f.write(joined_data)
-    
-    return joined_data
+    return "\n".join(text_data)
 
 
-def cleanup_download_dir(download_dir="data/fineweb_temp"):
-    """Remove temporary download directory to clean up disk space"""
-    if os.path.exists(download_dir):
-        print(f"Cleaning up temporary download directory: {download_dir}")
-        shutil.rmtree(download_dir)
-
-
-def train_simple_encoding(sample_size=100, vocab_size=600, download_dir="data/fineweb_temp",
-                          show_stats: bool =True, clean_up: bool =True, visualise: bool = False):
+def train_simple_encoding(sample_size=100, vocab_size=600, visualise: bool = False):
     """
     Train a custom BPE tokenizer using FineWeb data.
     
     Args:
         sample_size: Number of FineWeb samples to use
         vocab_size: Size of the vocabulary to train
-        download_dir: Directory to store downloaded data
-        show_stats: Whether to display statistics about the downloaded data
-        clean_up: Whether to delete the download directory after training
         visualise: Visualization mode for BPE training process ("color", "simple", or None)
     
     Returns:
         The trained tokenizer
     """
-    #pattern = (r"""'s|'t|'re|'ve|'m|'ll|'d| ?[\p{L}]+| ?[\p{N}]+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
-    pattern = (
-        r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
-    )
-    
-    print(f"Training tokenizer on {sample_size} FineWeb samples with vocab_size={vocab_size}")
-    data = fetch_fineweb_data(max_samples=sample_size, download_dir=download_dir, show_stats=show_stats)
+    data = fetch_fineweb_data(max_samples=sample_size)
 
     # Train the tokenizer with the specified vocabulary size (one less to account for the special token)
-    enc = SimpleBytePairEncoding.train(data, vocab_size=vocab_size, pat_str=pattern, visualise=visualise)
-    
-    # Clean up download directory if requested
-    if clean_up:
-        cleanup_download_dir(download_dir)
+    #gpt2_pattern = (r"""'s|'t|'re|'ve|'m|'ll|'d| ?[\p{L}]+| ?[\p{N}]+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
+    gpt4_pattern = (
+        r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
+    )
+    enc = SimpleBytePairEncoding.train(data, vocab_size=vocab_size, pat_str=gpt4_pattern, visualise=visualise)
 
     # Test the tokenizer with a simple example
     test_str = "hello world"
@@ -346,39 +312,29 @@ def train_simple_encoding(sample_size=100, vocab_size=600, download_dir="data/fi
     return enc
 
 
-def save_tokenizer(enc, filename="custom_tokenizer.pkl"):
+def save_tokenizer(enc, filename):
     """Save the tokenizer for later use"""
-    tokenizer_data = {
-        "pat_str": enc.pat_str,
-        "mergeable_ranks": enc.mergeable_ranks,
-    }
-    f = open(filename, 'wb')
+    tokenizer_data = {"pat_str": enc.pat_str, "mergeable_ranks": enc.mergeable_ranks,}
+    f = open(filename + '.pkl', 'wb')
     pickle.dump(tokenizer_data, f)
-    print(f"Tokenizer saved to {filename}")
+    print(f"Tokenizer saved to {filename}.pkl")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a custom BPE tokenizer")
-    parser.add_argument("--samples", type=int, default=1_000, help="Number of FineWeb samples to use for training")
-    parser.add_argument("--vocab-size", type=int, default=50257, help="Size of the vocabulary to train")
-    parser.add_argument("--save", type=str, default="custom_tokenizer.pkl", help="Filename to save the tokenizer (.pkl)")
-    parser.add_argument("--download-dir", type=str, default="fineweb_temp", help="Directory for temporary download files")
-    parser.add_argument("--delete_dataset", action="store_true", help="Delete downloaded data after training")
-    parser.add_argument("--visualise", action="store_true", help="Visualization mode during training")
+    parser.add_argument("-n", "--samples", type=int, default=10_000, help="Number of FineWeb documents to use for training")
+    parser.add_argument("-v", "--vocabsize", type=int, default=50257, help="Size of the vocabulary to train")
+    parser.add_argument("-f", "--savename", type=str, default="custom_tokenizer", help="Filename to save the tokenizer (no extension)")
+    parser.add_argument("--visualise", action="store_true", default=False, help="Visualization mode during training")
     args = parser.parse_args()
-    
-    # Set visualise to None if 'none' is selected
-    visualise = None if args.visualise == "none" else args.visualise
     
     # Train the tokenizer
     enc = train_simple_encoding(
         sample_size=args.samples,
-        vocab_size=args.vocab_size,
-        download_dir=args.download_dir,
-        clean_up=args.delete_dataset,  # Now only delete if --delete flag is provided
-        visualise=visualise
+        vocab_size=args.vocabsize,
+        visualise=args.visualise
     )
     
     # Save the tokenizer
-    save_tokenizer(enc, filename=args.save)
+    save_tokenizer(enc, filename=args.savename)
     
