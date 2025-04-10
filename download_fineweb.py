@@ -65,33 +65,31 @@ def tokenize(doc, enc, eot):
 def main():
     parser = argparse.ArgumentParser(description="FineWeb dataset preprocessing")
     parser.add_argument("-v", "--version", type=str, default="10Bedu", help="Which version of fineweb to use? 10B|100B|10Bedu|100Bedu (default 10Bedu)")
-    parser.add_argument("-s", "--shard_size", type=int, default=10**8, help="Size of each shard in tokens (default 100 million)")
-    parser.add_argument("-ms", "--max_shards", type=int, default=None, help="Maximum number of shards to create (defaults to entire dataset)")
-    parser.add_argument("-t", "--tokenizer", type=str, default="custom_tokenizer.pkl", help="Filename of custom tokenizer (default custom_tokenizer.pkl)")
+    parser.add_argument("-ss", "--shard_size", type=int, default=10**8, help="Size of each shard in tokens (default 100 million)")
+    parser.add_argument("-ns", "--num_shards", type=int, default=None, help="Maximum number of shards to create (defaults to entire dataset)")
+    parser.add_argument("-t", "--tokenizer", type=str, default=None, help="Filename of custom tokenizer (no default)")
     args = parser.parse_args()
+    assert args.tokenizer[-4:] == ".pkl", f"tokenizer must be .pkl"
 
     # FineWeb has a few possible subsamples available
     assert args.version in ["10B", "100B", "10Bedu", "100Bedu"], "version must be one of 10B, 100B, 10Bedu, or 100Bedu"
     if args.version == "10B":
         hug_name = "HuggingFaceFW/fineweb"
-        local_dir = "fineweb10B"
         remote_name = "sample-10BT"
         savename = "fineweb"
     elif args.version == "100B":
         hug_name = "HuggingFaceFW/fineweb"
-        local_dir = "fineweb100B"
         remote_name = "sample-100BT"
         savename = "fineweb"
     elif args.version == "10Bedu":
         hug_name = "HuggingFaceFW/fineweb-edu"
-        local_dir = "finewebedu10B"
         remote_name = "sample-10BT"
         savename = "finewebedu"
     elif args.version == "100Bedu":
         hug_name = "HuggingFaceFW/fineweb-edu"
-        local_dir = "finewebedu100B"
         remote_name = "sample-100BT"
         savename = "finewebedu"
+    local_dir = "data"
 
     # create the cache the local directory if it doesn't exist yet
     DATA_CACHE_DIR = os.path.join(os.path.dirname(__file__), local_dir)
@@ -101,7 +99,7 @@ def main():
     fw = load_dataset(hug_name, name=remote_name, split="train", streaming=True)
 
     # Load the tokenizer
-    tokenizer_config = pickle.load(open(args.tokenizer, 'rb'))
+    tokenizer_config = pickle.load(open(f"tokenizers/{args.tokenizer}", 'rb'))
     enc = tiktoken.Encoding(
         name=args.tokenizer[:-4], # :-4 to remove the .pkl
         pat_str=tokenizer_config['pat_str'],
@@ -145,8 +143,8 @@ def main():
                 shard_index += 1
                 
                 # Stop if we've reached the maximum number of shards
-                if args.max_shards is not None and shard_index >= args.max_shards + 1: # +1 since 0 is val
-                    print(f"Reached maximum number of shards ({args.max_shards}). Stopping.")
+                if args.num_shards is not None and shard_index >= args.num_shards + 1: # +1 since 0 is val
+                    print(f"Reached maximum number of shards ({args.num_shards}). Stopping.")
                     break
                     
                 progress_bar = None
@@ -154,8 +152,8 @@ def main():
                 all_tokens_np[0:len(tokens)-remainder] = tokens[remainder:]
                 token_count = len(tokens)-remainder
 
-        # write any remaining tokens as the last shard if we haven't reached max_shards
-        if token_count != 0 and (args.max_shards is None or shard_index < args.max_shards + 1):
+        # write any remaining tokens as the last shard if we haven't reached num_shards
+        if token_count != 0 and (args.num_shards is None or shard_index < args.num_shards + 1):
             split = "val" if shard_index == 0 else "train"
             filename = os.path.join(DATA_CACHE_DIR, f"{savename}_{split}_{shard_index:06d}.bin")
             write_datafile(filename, all_tokens_np[:token_count])

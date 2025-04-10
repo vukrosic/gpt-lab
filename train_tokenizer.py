@@ -17,6 +17,7 @@ from itertools import chain
 
 import torch
 import torch.distributed as dist
+from datasets.distributed import split_dataset_by_node
 #device = "cuda" if torch.cuda.is_available() else "cpu"
 # Check if environment variables are set by torchrun, otherwise default to single GPU
 if "RANK" in os.environ and "WORLD_SIZE" in os.environ and "LOCAL_RANK" in os.environ:
@@ -182,7 +183,6 @@ def bpe_train(
     words: list[list[bytes]] = [
         [bytes([b]) for b in word.encode("utf-8")] for word in regex.findall(pat_str, data)
     ]
-    m = max([len(word) for word in words])
     # Create a list to store numeric token IDs for tensor operations
     # Initially, these are just byte values (0-255)
     ids_lofl = [[ranks[b] for b in word] for word in words]
@@ -210,13 +210,9 @@ def bpe_train(
         unique = unique[:, valid_mask]
         counts = counts[valid_mask]
         counts, sort_idx = torch.sort(counts, descending=True)
-        ### single GPU
-        #pair_index = sort_idx[0] # shape (1)
-        #best_pair = unique[:, pair_index].cpu().numpy() # (2)
-        ### multi-GPU 
-        pairs_idx = sort_idx[rank * world_size:(rank + 1) * world_size] # shape (world_size)
+        pairs_idx = sort_idx[:world_size]#[rank * world_size:(rank + 1) * world_size] # shape (world_size)
         most_common_pairs_local = unique[:, pairs_idx] # (2, world_size)
-        counts_local = counts[pairs_idx] # (world_size)
+        counts_local = counts[:world_size]#[:pairs_idx] # (world_size)
         most_common_pairs_global = torch.zeros((2,world_size ** 2), dtype=torch.float32, device=device)
         counts_global = torch.zeros(world_size ** 2, dtype=torch.float32, device=device)
         most_common_pairs_global[:, rank * world_size:(rank + 1) * world_size] = most_common_pairs_local.to(torch.float32)
@@ -316,29 +312,29 @@ def fetch_fineweb_data(max_chars: int = 2**22):
                            name="sample-10BT", 
                            split="train", 
                            streaming=True)
+    dataset = split_dataset_by_node(dataset, rank=rank, world_size=world_size)
     
     text_data = []
     doc_lengths = []
     tot_len = 0
     for i, item in enumerate(dataset):
-        if i % world_size != rank:
-            continue
+        tot_len += len(item["text"])
         if tot_len >= max_chars:
+            tot_len -= len(item["text"])
             break
         text_data.append(item["text"])
         doc_lengths.append(len(item["text"]))
-        tot_len += len(item["text"])
     
     # Show statistics if requested
     if rank == 0:
-        print(f"\nDataset Statistics for GPU {rank}:")
-        print(f"Total documents: {len(text_data)}")
-        print(f"Total characters: {sum(doc_lengths):,}")
-        print(f"Average document length: {np.mean(doc_lengths):.1f} characters")
-        print(f"Median document length: {np.median(doc_lengths):.1f} characters")
-        print(f"Shortest document: {min(doc_lengths)} characters")
-        print(f"Longest document: {max(doc_lengths):,} characters")
-        print(f"Standard deviation: {np.std(doc_lengths):.1f} characters")
+        print(f"\nDataset Statistics for GPU {rank}:"
+            f"\nTotal documents: {len(text_data)}"
+            f"\nTotal characters: {sum(doc_lengths):,}"
+            f"\nAverage document length: {np.mean(doc_lengths):.1f} characters"
+            f"\nMedian document length: {np.median(doc_lengths):.1f} characters"
+            f"\nShortest document: {min(doc_lengths)} characters"
+            f"\nLongest document: {max(doc_lengths):,} characters"
+            f"\nStandard deviation: {np.std(doc_lengths):.1f} characters")
     
     # Join all text data into a single string
     return "\n".join(text_data)
@@ -377,19 +373,37 @@ def train_simple_encoding(sample_size: int, vocab_size: int, demo: bool = False)
     return enc
 
 
-def save_tokenizer(enc, filename):
+def save_tokenizer(enc, name, vocab_size, sample_size):
     """Save the tokenizer for later use"""
-    tokenizer_data = {"pat_str": enc.pat_str, "mergeable_ranks": enc.mergeable_ranks,}
-    f = open(filename + '.pkl', 'wb')
-    pickle.dump(tokenizer_data, f)
-    print(f"Tokenizer saved to {filename}.pkl")
+    # Ensure the directory exists
+    os.makedirs('tokenizers', exist_ok=True)
+    
+    # Construct the filename
+    full_filename = f"tokenizers/{name}_v{vocab_size}_n{sample_size}.pkl"
+    
+    # Read the content of train_tokenizer.py
+    with open(__file__, 'r') as f:
+        script_content = f.read()
+    
+    # Prepare the tokenizer data
+    tokenizer_data = {
+        "pat_str": enc.pat_str,
+        "mergeable_ranks": enc.mergeable_ranks,
+        "script_content": script_content  # Add the script content for backup
+    }
+    
+    # Save the tokenizer data
+    with open(full_filename, 'wb') as f:
+        pickle.dump(tokenizer_data, f)
+    
+    print(f"Tokenizer saved to {full_filename}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a custom BPE tokenizer")
     parser.add_argument("-n", "--samples", type=int, default=2**27, help="Maximum number of text characters to use PER GPU for training")
     parser.add_argument("-v", "--vocabsize", type=int, default=50256, help="Size of the vocabulary to train (default 50256; same as GPT2 minus <|endoftext|>)")
-    parser.add_argument("-f", "--savename", type=str, default="custom_tokenizer", help="Filename to save the tokenizer (no extension)")
+    parser.add_argument("-f", "--name", type=str, default="gpt4regex", help="Filename prefix to save the tokenizer (default 'gpt4regex')")
     parser.add_argument("--demo", action="store_true", default=False, help="Visualize tokenization during training")
     args = parser.parse_args()
 
@@ -402,5 +416,5 @@ if __name__ == "__main__":
     
     # Save the tokenizer
     if master_process:
-        save_tokenizer(enc, filename=args.savename)
+        save_tokenizer(enc, args.name, args.vocabsize, args.samples * world_size)
     

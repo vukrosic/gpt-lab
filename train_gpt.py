@@ -1,7 +1,5 @@
 import os
 import sys
-with open(sys.argv[0]) as f:
-    code = f.read() # read the code of this file ASAP, for logging
 import uuid
 import time
 import copy
@@ -14,6 +12,8 @@ import tiktoken
 import json
 import datetime
 import pickle
+import shutil # Added import for file copying
+import csv # Added import for CSV writing
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch
@@ -531,16 +531,16 @@ def distributed_data_generator(filename_pattern: str, batch_size: int, rank: int
 class Hyperparameters:
     model_name = "moddedGPT"
     # data
-    train_files = "fineweb*10B/fineweb*_train_*.bin" # input .bin to train on
-    val_files = "fineweb*10B/fineweb*_val_*.bin" # input .bin to eval validation loss on
-    val_tokens = 4096#10485760 # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
-    train_seq_len = 1024#8*1024 # FlexAttention sequence length - reduced from 48*1024 for GPUs w/ at least 8GB VRAM during testing
-    val_seq_len = 2048#12*1024 # FlexAttention sequence length for validation - reduced from 4*64*1024
+    train_files = "data/fineweb*_train_*.bin" # input .bin to train on
+    val_files = "data/fineweb*_val_*.bin" # input .bin to eval validation loss on
+    val_tokens = 10485760 # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
+    train_seq_len = 8*1024 # FlexAttention sequence length - reduced from 48*1024 for GPUs w/ at least 8GB VRAM during testing
+    val_seq_len = 12*1024 # FlexAttention sequence length for validation - reduced from 4*64*1024
     # optimization
     num_iterations = 20#_000 # number of iterations to run
     cooldown_frac = 0.4 # fraction of training spent cooling down the learning rate
     # architecture
-    tokenizer = "custom_tokenizer.pkl" # any .pkl file
+    tokenizer = "gpt4regex_v1000_n40000.pkl" # any .pkl file in tokenizers/
     vocab_size = 1001#50257
     # model size - new parameters for GPUs w/ at least 8GB VRAM during testing
     num_layers = 6  # 124m param model should be 12
@@ -552,7 +552,7 @@ class Hyperparameters:
     use_fp8 = False # Set to True on H100s and newer, False on older
     # evaluation and logging
     val_loss_every = 100 # every how many steps to evaluate val loss? 0 for only at the end
-    save_checkpoint = False
+    save_model = True
 
     def __post_init__(self):
         # Validate and set derived param eters
@@ -598,62 +598,75 @@ master_process = (rank == 0)  # this process will do logging, checkpointing etc.
 
 # begin logging
 logfile = None
+experiment_dir_path = None # Define experiment_dir_path outside the if block
+metrics_csv_path = None # Define metrics_csv_path
 if master_process:
     start_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    logfile = f"experiments/{start_time}_{args.model_name}_D={args.model_dim}_L={args.num_layers}_H={args.num_heads}.txt"
-    os.makedirs("experiments", exist_ok=True)
-    print(logfile)
+    # 1. Create the experiment directory name
+    experiment_dir_name = f"{start_time}_{args.model_name}_D={args.model_dim}_L={args.num_layers}_H={args.num_heads}"
+    # 2. Create the experiment directory path
+    experiment_dir_path = Path("experiments") / experiment_dir_name
+    os.makedirs(experiment_dir_path, exist_ok=True)
+    # 3. Set the logfile path inside the experiment directory
+    logfile = experiment_dir_path / "training_log.txt"
+    # 4. Set the metrics CSV file path
+    metrics_csv_path = experiment_dir_path / "metrics.csv"
+    print(f"Logging to: {logfile}")
+    print(f"Metrics CSV: {metrics_csv_path}")
+    # 5. Initialize metrics CSV file with headers
+    with open(metrics_csv_path, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(["step", "type", "loss", "cumulative_time_ms", "step_avg_ms"])
+
 def print0(s, console=False):
-    if master_process:
+    # Ensure print0 works even if not master_process (but does nothing)
+    if master_process and logfile:
         with open(logfile, "a") as f:
             if console:
                 print(s)
             print(s, file=f)
 
-# begin by printing all relevant files
-print0(code)  # Print this file's code
+#################################################
+######### copying all relevant files  ###########
+#################################################
+if master_process and experiment_dir_path:
+    print0("Copying relevant files to experiment directory...")
+    files_to_copy = ["requirements.txt", sys.argv[0], "download_hellaswag.py", "download_fineweb.py"]
+    for file_path_str in files_to_copy:
+        file_path = Path(file_path_str)
+        if file_path.exists():
+            try:
+                # Use Path object methods for cleaner path manipulation
+                target_path = experiment_dir_path / f"{file_path.stem}.txt"
+                shutil.copy(str(file_path), str(target_path))
+                print0(f"- Copied {file_path} to {target_path}")
+            except Exception as e:
+                print0(f"- Failed to copy {file_path}: {e}")
+        else:
+            print0(f"- File not found, skipping: {file_path}")
 
-# Print hellaswag.py if it exists
-try:
-    with open("hellaswag.py", "r") as f:
-        print0("\n" + "="*100 + "\nhellaswag.py:\n" + "="*100)
-        print0(f.read())
-except FileNotFoundError:
-    print0("\n" + "="*100 + "\nhellaswag.py not found\n" + "="*100)
+    # Handle tokenizer separately as it's a .pkl file
+    tokenizer_path = Path(f"data/{args.tokenizer}")
+    if tokenizer_path.exists():
+        try:
+            with open(tokenizer_path, 'rb') as f:
+                tokenizer_config = pickle.load(f)
+            # Save the config as a pretty-printed text file
+            tokenizer_log_path = experiment_dir_path / f"{tokenizer_path.stem}_config.txt"
+            import pprint
+            tokenizer_str = pprint.pformat(tokenizer_config)
+            with open(tokenizer_log_path, "w") as f:
+                f.write(f"Tokenizer Config ({args.tokenizer}):\n")
+                f.write("="*100 + "\n")
+                f.write(tokenizer_str)
+            print0(f"- Saved tokenizer config to {tokenizer_log_path}")
+            del tokenizer_config # Free up memory
+        except Exception as e:
+            print0(f"- Error processing tokenizer {tokenizer_path}: {e}")
+    else:
+        print0(f"- Tokenizer file not found: {tokenizer_path}")
 
-# Load and log tokenizer dictionary
-if master_process:
-    try:
-        with open(args.tokenizer, 'rb') as f:
-            tokenizer_config = pickle.load(f)
-        print0("\n" + "="*100 + f"\nTokenizer Config ({args.tokenizer}):\n" + "="*100)
-        # Pretty print the dictionary for better readability in the log file
-        import pprint
-        tokenizer_str = pprint.pformat(tokenizer_config)
-        print0(tokenizer_str)
-        del tokenizer_config # Free up memory if not needed immediately
-    except FileNotFoundError:
-        print0(f"\n" + "="*100 + f"\nTokenizer file {args.tokenizer} not found\n" + "="*100)
-    except Exception as e:
-        print0(f"\n" + "="*100 + f"\nError loading tokenizer {args.tokenizer}: {e}\n" + "="*100)
-
-# Print train_tokenizer.py if it exists
-try:
-    with open("train_tokenizer.py", "r") as f:
-        print0("\n" + "="*100 + "\ntrain_tokenizer.py:\n" + "="*100)
-        print0(f.read())
-except FileNotFoundError:
-    print0("\n" + "="*100 + "\ntrain_tokenizer.py not found\n" + "="*100)
-
-# Print fineweb.py if it exists
-try:
-    with open("fineweb.py", "r") as f:
-        print0("\n" + "="*100 + "\nfineweb.py:\n" + "="*100)
-        print0(f.read())
-except FileNotFoundError:
-    print0("\n" + "="*100 + "\nfineweb.py not found\n" + "="*100)
-
-print0("="*100)
+    print0("="*100)
 
 # log information about the hardware/software environment this is running on
 print0(f"Running Python {sys.version}")
@@ -771,7 +784,7 @@ print0("kernels are toasty", console=True)
 
 def sample_from_model(model, prompt, max_new_tokens=100, temperature=0.8, top_k=200):
     """Generate text samples from the model given a prompt."""
-    tokenizer_config = pickle.load(open(args.tokenizer, 'rb'))
+    tokenizer_config = pickle.load(open(f"tokenizers/{args.tokenizer}", 'rb'))
     enc = tiktoken.Encoding(
         name=args.tokenizer[:-4], # :-4 to remove the .pkl
         pat_str=tokenizer_config['pat_str'],
@@ -780,7 +793,6 @@ def sample_from_model(model, prompt, max_new_tokens=100, temperature=0.8, top_k=
             "<|endoftext|>": len(tokenizer_config['mergeable_ranks']),
         }
     )
-    print(len(tokenizer_config['mergeable_ranks']))
     encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
     decode = lambda l: enc.decode(l)
     
@@ -811,7 +823,10 @@ for step in range(train_steps + 1):
     if last_step or (args.val_loss_every > 0 and step % args.val_loss_every == 0):
         # stop the clock
         torch.cuda.synchronize()
+        # Note: training_time_ms accumulates *only* the time spent in the training loop
+        # It does not include time spent in validation or other operations outside the loop
         training_time_ms += 1000 * (time.perf_counter() - t0)
+        
         model.eval()
         
         val_batch_size = world_size * args.val_seq_len
@@ -836,18 +851,33 @@ for step in range(train_steps + 1):
         del val_loader
         if world_size > 1:
             dist.all_reduce(val_loss, op=dist.ReduceOp.AVG)
-        print0(f"step:{step}/{train_steps} val_loss:{val_loss:.4f} train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms/max(step, 1):.2f}ms", console=True)
+        
+        # Calculate average time per step up to this point
+        step_avg_ms = training_time_ms / max(step, 1) 
+        
+        print0(f"step:{step}/{train_steps} val_loss:{val_loss:.4f} train_time:{training_time_ms:.0f}ms step_avg:{step_avg_ms:.2f}ms", console=True)
+        
+        # Log validation metrics to CSV
+        if master_process and metrics_csv_path:
+            with open(metrics_csv_path, 'a', newline='') as csvfile:
+                writer = csv.writer(csvfile)
+                # Use .item() to get float from tensor for val_loss
+                writer.writerow([step, "val", f"{val_loss.item():.4f}", f"{training_time_ms:.0f}", f"{step_avg_ms:.2f}"])
         
         model.train()
-        # start the clock again
+        # start the clock again for the next training segment
         torch.cuda.synchronize()
         t0 = time.perf_counter()
 
     if last_step:
-        if master_process and args.save_checkpoint:
-            log = dict(step=step, code=code, model=model.state_dict(), optimizers=[opt.state_dict() for opt in optimizers])
-            os.makedirs(f"experiments/{start_time}", exist_ok=True) 
-            torch.save(log, f"experiments/{start_time}/state_step{step:06d}.pt") 
+        # 5. Save model checkpoint inside the experiment directory
+        if master_process and args.save_model and experiment_dir_path:
+            log = dict(step=step, model=model.state_dict(), optimizers=[opt.state_dict() for opt in optimizers])
+            # Ensure experiment_dir_path exists (though it should from earlier)
+            os.makedirs(experiment_dir_path, exist_ok=True)
+            save_path = experiment_dir_path / f"state_step{step:06d}.pt"
+            torch.save(log, str(save_path))
+            print0(f"Saved checkpoint to {save_path}", console=True)
         # the last step only has the validation loop, so break to avoid training
         break
 
@@ -876,9 +906,25 @@ for step in range(train_steps + 1):
     # null the gradients
     model.zero_grad(set_to_none=True)
         
-    # logging
-    approx_training_time_ms = training_time_ms + 1000 * (time.perf_counter() - t0)
-    print0(f"step:{step+1}/{train_steps} train_time:{approx_training_time_ms:.0f}ms step_avg:{approx_training_time_ms/(step + 1):.2f}ms", console=True)
+    # logging - calculate *approximate* cumulative time and step average for logging during training
+    # Note: This is approximate because it includes the time for the current step's forward/backward pass
+    # The more precise time is recorded just before validation
+    if master_process:
+        torch.cuda.synchronize() # Ensure accurate timing up to this point
+        # Calculate time elapsed since the end of the last validation phase
+        current_segment_duration_ms = 1000 * (time.perf_counter() - t0) 
+        # Calculate the *true* approximate cumulative time
+        approx_cumulative_time_ms = training_time_ms + current_segment_duration_ms
+        approx_step_avg_ms = approx_cumulative_time_ms / (step + 1)
+        print0(f"step:{step+1}/{train_steps} train_time:{approx_cumulative_time_ms:.0f}ms step_avg:{approx_step_avg_ms:.2f}ms", console=True)
+        
+        # Log training step timing to CSV
+        if metrics_csv_path:
+             with open(metrics_csv_path, 'a', newline='') as csvfile:
+                writer = csv.writer(csvfile)
+                # Loss is not typically calculated per training step here, add loss logging if needed
+                writer.writerow([step + 1, "train", "", f"{approx_cumulative_time_ms:.0f}", f"{approx_step_avg_ms:.2f}"])
+
 
 print0(f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB "
        f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB", console=True)
@@ -931,7 +977,7 @@ def evaluate_hellaswag(model, data_path, limit=1014):
     """Evaluate model on HellaSwag in a distributed way using modulo distribution"""
     assert limit <= 1014, f'there are only 1014 questions in the benchmark, but got limit={limit}'
     torch._dynamo.config.disable = True
-    tokenizer_config = pickle.load(open(args.tokenizer, 'rb'))
+    tokenizer_config = pickle.load(open(f"tokenizers/{args.tokenizer}", 'rb'))
     enc = tiktoken.Encoding(
         name=args.tokenizer[:-4], # :-4 to remove the .pkl
         pat_str=tokenizer_config['pat_str'],
@@ -1070,7 +1116,7 @@ def evaluate_hellaswag(model, data_path, limit=1014):
         print0(f"Normalized accuracy: {num_correct_norm}/{num_total}={accuracy_norm:.4f} [95% CI: {ci_norm[0]:.3f}-{ci_norm[1]:.3f}]", console=True)
 
 # After training and sample generations, evaluate on HellaSwag
-hellaswag_path = "./hellaswag_val.jsonl" 
+hellaswag_path = "./data/hellaswag_val.jsonl" 
 # Check if the HellaSwag data file exists
 if os.path.exists(hellaswag_path):
     print0(f"Found HellaSwag dataset at {hellaswag_path}", console=True)
