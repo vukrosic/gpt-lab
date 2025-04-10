@@ -1176,7 +1176,7 @@ hellaswag_path = "./data/hellaswag_val.jsonl"
 # Check if the HellaSwag data file exists
 if os.path.exists(hellaswag_path):
     print0(f"Found HellaSwag dataset at {hellaswag_path}", console=True)
-    evaluate_hellaswag(model, hellaswag_path, limit=20)#1014)
+    evaluate_hellaswag(model, hellaswag_path, limit=1014) # 1014 is largest possible
 else:
     print0(f"HellaSwag dataset not found at {hellaswag_path}, skipping evaluation.", console=True)
 

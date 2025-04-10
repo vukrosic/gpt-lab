@@ -1,4 +1,4 @@
-# NanoGPT-Lab **(BETA)**
+# GPT-Lab **(BETA)**
 this repo is a massive overhaul of [Modded-NanoGPT](https://github.com/KellerJordan/modded-nanogpt) with the goal of being a base for amateurs to do cheap & easy LLM experiments at any scale. 
 
 **this repo is currently in beta, meaning that I think it's pretty workable but have not utilized it on enough of my own projects to guarantee that. before taking it out of beta I will 1) implement the further improvements already defined in the todo section below and 2) go and implement a few ideas and use what I learn to improve this codebase**
@@ -17,7 +17,7 @@ The input arguments in these instructions are comically small values designed to
 python train_tokenizer.py --samples 100000 --vocabsize 1000 --name mytokenizer --demo
 ```
 ```multiple GPUs
-torchrun --nproc_per_node=2 train_tokenizer.py --samples 10000000 --vocabsize 8191 --name mytokenizer --demo
+torchrun --nproc_per_node=2 train_tokenizer.py --samples 100000 --vocabsize 8191 --name mytokenizer --demo
 ```
 3. dataset options are 10B, 100B, 10Bedu (default), or 100Bedu. tune the shard size (default 100mil) and number of shards to the number of shards to your desired training run length. the script will only create one validation shard which is not included in the count of num_shards
 ```
@@ -26,10 +26,10 @@ python download_fineweb.py --version 10B --shard_size 10000000 --num_shards 1 --
 4. `python download_hellaswag.py`
 5. Open `train_gpt.py` and tune the hyperparameters to your liking, or override the defaults using input arguments. 
 ```single GPU
-python train_gpt.py --name myGPT --tokenizer mytokenizer_v1000_n10000.pkl --vocab_size 1001 --model_dim 128 --num_heads 4 --num_layers 6
+python train_gpt.py --model_name myGPT --tokenizer mytokenizer_v1000_n100000.pkl --vocab_size 1001 --model_dim 128 --num_heads 4 --num_layers 6
 ```
 ```multiple GPUs
-torchrun --nproc_per_node=G train_gpt.py --name myGPT --tokenizer mytokenizer_v1000_n10000.pkl --vocab_size 1001 --model_dim 128 --num_heads 4 --num_layers 6
+torchrun --nproc_per_node=G train_gpt.py --model_name myGPT --tokenizer mytokenizer_v1000_n100000.pkl --vocab_size 1001 --model_dim 128 --num_heads 4 --num_layers 6
 ```
     - Note: vocabulary size must be equial to your tokenizer size PLUS any special tokens defined in this script (1 for '<|endoftext|>', so 1000 + 1 = 10001)
     - **WARNING:** if you set save_model=True that will create a .pt file, but by default the .gitignore will cause this to not be pushed with the rest of the repo, meaning you have to find a way to save it manually. This is done because the filesize is too large for github
