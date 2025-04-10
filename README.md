@@ -9,7 +9,7 @@ this repo is a massive overhaul of [Modded-NanoGPT](https://github.com/KellerJor
 - a fully from-scratch BPE tokenizer implementation
 
 ## instructions 
-The input arguments in these instructions are comically small values designed to work on the tiniest GPU for demonstration purposes to get you up and running. In practice you'll have to tune them to properly utilize the available VRAM of your setup. Also, in the below instructions, `G` is the number of GPUs you have
+The input arguments in these instructions are comically small values designed to work on the tiniest GPU for demonstration purposes to get you up and running; in practice you'll have to tune them to properly utilize the available VRAM of your setup. Also, in the below instructions, `G` is the number of GPUs you have
 
 1. `pip install -r requirements.txt`
 2. samples is the number of characters to train on
@@ -34,6 +34,8 @@ torchrun --nproc_per_node=G train_gpt.py --name myGPT --tokenizer mytokenizer_v1
     - Note: vocabulary size must be equial to your tokenizer size PLUS any special tokens defined in this script (1 for '<|endoftext|>', so 1000 + 1 = 10001)
     - **WARNING:** if you set save_model=True that will create a .pt file, but by default the .gitignore will cause this to not be pushed with the rest of the repo, meaning you have to find a way to save it manually. This is done because the filesize is too large for github
 6. once all that is confirmed to be up & working, start editing the code and running your experiments
+
+If you'd like to confirm all is working without running each command manually, do
 
 ## todos / planned features:
 - [x] integrate generate()
@@ -69,24 +71,29 @@ torchrun --nproc_per_node=G train_gpt.py --name myGPT --tokenizer mytokenizer_v1
     - [ ] ~~speed up w/ torch.compile~~
     - [x] setup for multi-gpu training
         - [x] figure out how to use streaming=True with multiple GPUs
+    - [ ] make custom triton kernels to speed up & improve vram utilization
+        - have em operate in uint16 since pytorch doesn't support it?
+    - [ ] make default dataset size auto-estimate GPU vram that'll be taken up & set to fill it up
 - [x] switch experiment output from single text file to folder with csv file of loss, model weights, etc
-- [ ] create simple test script
-    - [x] add option to manipulate train_gpt.py hyperparameters through input args so that script can use tiny test
-- [ ] implement [[DAGSeq2DAGSeq]] to test & learn more about how this repo should work
+- [x] add option to manipulate train_gpt.py hyperparameters through input args
+- [ ] **implement [[DAGSeq2DAGSeq]] to test & learn more about how this repo should work**
+- [ ] excessively comment all the Modded-NanoGPT specific architecture edits to explain what's happening
+    - [ ] ensure consistency in style across documents (eg. choose between (B,N,D) and (batch_size, seq_len, model_dim))
 - [ ] architecture edits
     - [ ] adjust value embeddings to dynamically account for different number of layers
     - [ ] remove simple doc-causal attention mask and re-implement moddedGPT's original masks that alternate bw full causal & sliding window and increase window size over the course of training
         - [ ] make full-sliding pattern dynamically account for different number of layers
-- [ ] calc runtime of 10B? tokens on 8xH100 & therefore cost of doing research
-- [ ] add batched inference
-    - [ ] use to speed up hellaswag
-- [ ] excessively comment all the Modded-NanoGPT specific architecture edits to explain what's happening
-    - [ ] ensure consistency in style across documents (eg. choose between (B,N,D) and (batch_size, seq_len, model_dim))
+    - [ ] more advanced parallelization scheme so that we can do MoE??
+    - [ ] MLA or deepseek's new sparse attention?
 - [ ] make NanoGPT and Llama3 versions for those who want to work off of those as a base. They'd be less bang for your buck but good for people who want a more familiar baseline rather than all the weird tricks in moddedGPT
+    - [ ] continually update moddedGPT & the tokenizer to fit best methods & bring down costs while leaving nanoGPT and llama versions stagnant
+- [ ] train models on 1x8GB vram, 2x12 GB, 4x24GB, and 8x80GB and write down how much each one cost me in the README
+    - [ ] use chinchilla-optimal model size & data quantity
 - [ ] more benchmarks? api calls to a smarter LLM for mass comparisons?
+    - [ ] add batched inference to speed up said benchmarks
 - [ ] write latex preprint skeleton
     - [ ] moddedGPT architecture specifics in an appendix
-    - [ ] auto-generated loss curves & benchmark tables
+    - [ ] auto-generated loss curves & benchmark tables to go right into the preprint
 - [ ] post-training/RL?
 
 # Modded-NanoGPT (ORIGINAL README)

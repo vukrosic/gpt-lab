@@ -402,10 +402,14 @@ def save_tokenizer(enc, name, vocab_size, sample_size):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a custom BPE tokenizer")
-    parser.add_argument("-n", "--samples", type=int, default=2**27, help="Maximum number of text characters to use PER GPU for training")
-    parser.add_argument("-v", "--vocabsize", type=int, default=50256, help="Size of the vocabulary to train (default 50256; same as GPT2 minus <|endoftext|>)")
-    parser.add_argument("-f", "--name", type=str, default="gpt4regex", help="Filename prefix to save the tokenizer (default 'gpt4regex')")
-    parser.add_argument("--demo", action="store_true", default=False, help="Visualize tokenization during training")
+    parser.add_argument("-n", "--samples", type=int, default=2**27, 
+        help="Maximum number of text characters to use PER GPU for training (default 2^27 should fit on 8gb of VRAM)")
+    parser.add_argument("-v", "--vocabsize", type=int, default=50256, 
+        help="Size of the vocabulary to train (default 50256; same as GPT2 minus <|endoftext|>)")
+    parser.add_argument("-f", "--name", type=str, default="gpt4regex", 
+        help="Filename prefix to save the tokenizer (default 'gpt4regex')")
+    parser.add_argument("--demo", action="store_true", default=False, 
+        help="Visualize tokenization during training")
     args = parser.parse_args()
 
     # Train the tokenizer

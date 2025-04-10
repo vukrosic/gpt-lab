@@ -544,9 +544,9 @@ class Hyperparameters:
     tokenizer = "gpt4regex_v50256_n134217728.pkl" # any .pkl file in tokenizers/
     vocab_size = 50257 # should be the tokenizer's size plus any special tokens defined in this script
     # model size - new parameters for GPUs w/ at least 8GB VRAM during testing
-    num_layers = 6  # 124m param model should be 12
+    num_layers = 12  # 124m param model should be 12
     num_heads = 6   # 124m param model should be 6
-    model_dim = 384  # must be divisible by num_heads
+    model_dim = 768  # must be divisible by num_heads
     head_dim = None  # if None, will be set to model_dim // num_heads
     mlp_ratio = 4  # 124m param model should be 4
     # memory optimization for GPUs w/ at least 8GB VRAM during testing
