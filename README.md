@@ -17,7 +17,7 @@ The input arguments in these instructions are comically small values designed to
 python train_tokenizer.py --samples 100000 --vocabsize 1000 --name mytokenizer --demo
 ```
 ```multiple GPUs
-torchrun --nproc_per_node=2 train_tokenizer.py --samples 100000 --vocabsize 8191 --name mytokenizer --demo
+torchrun --nproc_per_node=G train_tokenizer.py --samples 100000 --vocabsize 1000 --name mytokenizer --demo
 ```
 3. dataset options are 10B, 100B, 10Bedu (default), or 100Bedu. tune the shard size (default 100mil) and number of shards to the number of shards to your desired training run length. the script will only create one validation shard which is not included in the count of num_shards
 ```

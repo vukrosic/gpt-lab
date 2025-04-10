@@ -18,7 +18,6 @@ from itertools import chain
 import torch
 import torch.distributed as dist
 from datasets.distributed import split_dataset_by_node
-#device = "cuda" if torch.cuda.is_available() else "cpu"
 # Check if environment variables are set by torchrun, otherwise default to single GPU
 if "RANK" in os.environ and "WORLD_SIZE" in os.environ and "LOCAL_RANK" in os.environ:
     # Multi-GPU setup with torchrun
@@ -206,15 +205,28 @@ def bpe_train(
         pairs = torch.stack((ids[:-1], ids[1:]), dim=0) # (2, words_in_data * (avg_word_len + 1))
         unique, counts = torch.unique(pairs, return_counts=True, dim=1)
             # shapes (2, words_in_data * (avg_word_len + 1)) and (words_in_data * (avg_word_len + 1))
-        valid_mask = torch.all(unique != -1, dim=0)
-        unique = unique[:, valid_mask]
-        counts = counts[valid_mask]
-        counts, sort_idx = torch.sort(counts, descending=True)
-        pairs_idx = sort_idx[:world_size]#[rank * world_size:(rank + 1) * world_size] # shape (world_size)
+        #if rank == 1: 
+        print(rank, "unqie & counts", unique.shape, counts.shape)
+        valid_mask = torch.all(unique != -1, dim=0) # (very_long) where very_long < words_in_data * (avg_word_len + 1)
+        unique = unique[:, valid_mask] # (2, very_long)
+        counts = counts[valid_mask] # (very_long)
+        #if rank == 1: 
+        print(rank, "unique & counts", unique.shape, counts.shape)
+        counts, sort_idx = torch.sort(counts, descending=True) # (very_long) and (very_long)
+        #if rank == 1: 
+        print(rank, "counts & sort_idx", counts.shape, sort_idx.shape)
+        #pairs_idx = sort_idx[rank * world_size:(rank + 1) * world_size] # shape (world_size)
+        pairs_idx = sort_idx[:world_size] # shape (world_size)
         most_common_pairs_local = unique[:, pairs_idx] # (2, world_size)
-        counts_local = counts[:world_size]#[:pairs_idx] # (world_size)
+        #counts_local = counts[:pairs_idx] # (world_size)
+        counts_local = counts[:world_size]# (world_size)
+        #if rank == 1: 
+        print(rank, "pairs_idx, most_common_pairs_local, & counts_local", 
+                            pairs_idx.shape, most_common_pairs_local.shape, counts_local.shape,)
         most_common_pairs_global = torch.zeros((2,world_size ** 2), dtype=torch.float32, device=device)
         counts_global = torch.zeros(world_size ** 2, dtype=torch.float32, device=device)
+        #if rank == 1: 
+        print(rank, "most_common_pairs_global & counts_global", most_common_pairs_global.shape, counts_global.shape)
         most_common_pairs_global[:, rank * world_size:(rank + 1) * world_size] = most_common_pairs_local.to(torch.float32)
         counts_global[rank * world_size:(rank + 1) * world_size] = counts_local.to(torch.float32)
         
