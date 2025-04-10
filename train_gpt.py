@@ -7,6 +7,7 @@ import glob
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+import argparse
 import itertools
 import tiktoken
 import json
@@ -529,7 +530,7 @@ def distributed_data_generator(filename_pattern: str, batch_size: int, rank: int
 
 @dataclass
 class Hyperparameters:
-    model_name = "moddedGPT"
+    model_name = "Modded-NanoGPT"
     # data
     train_files = "data/fineweb*_train_*.bin" # input .bin to train on
     val_files = "data/fineweb*_val_*.bin" # input .bin to eval validation loss on
@@ -540,8 +541,8 @@ class Hyperparameters:
     num_iterations = 20#_000 # number of iterations to run
     cooldown_frac = 0.4 # fraction of training spent cooling down the learning rate
     # architecture
-    tokenizer = "gpt4regex_v1000_n40000.pkl" # any .pkl file in tokenizers/
-    vocab_size = 1001#50257
+    tokenizer = "gpt4regex_v50256_n134217728.pkl" # any .pkl file in tokenizers/
+    vocab_size = 50257 # should be the tokenizer's size plus any special tokens defined in this script
     # model size - new parameters for GPUs w/ at least 8GB VRAM during testing
     num_layers = 6  # 124m param model should be 12
     num_heads = 6   # 124m param model should be 6
@@ -552,7 +553,7 @@ class Hyperparameters:
     use_fp8 = False # Set to True on H100s and newer, False on older
     # evaluation and logging
     val_loss_every = 100 # every how many steps to evaluate val loss? 0 for only at the end
-    save_model = True
+    save_model = False
 
     def __post_init__(self):
         # Validate and set derived param eters
@@ -564,9 +565,57 @@ class Hyperparameters:
         assert self.val_seq_len % 128 == 0, f"val_seq_len must be multiple of 128, got {self.val_seq_len}"
         assert self.num_layers >= 2, f"num_layers must be greater than or equal to 2 because of attention mask structure, got {self.num_layers}"
         assert self.num_layers >= 6, f"num_layers must be greater than or equal to 2 because of value embeddings structure, got {self.num_layers}"
-            # TODO adjust value embeddings to be more dynamic later
 
-args = Hyperparameters()
+    @classmethod
+    def from_args(cls):
+        """Create Hyperparameters from command-line arguments."""
+        parser = argparse.ArgumentParser(description="Train a GPT model with customizable hyperparameters")
+        
+        # Data arguments
+        parser.add_argument('--train_files', type=str, help='Pattern for training data files')
+        parser.add_argument('--val_files', type=str, help='Pattern for validation data files')
+        parser.add_argument('--val_tokens', type=int, help='Number of tokens for validation')
+        parser.add_argument('--train_seq_len', type=int, help='Training sequence length')
+        parser.add_argument('--val_seq_len', type=int, help='Validation sequence length')
+        
+        # Optimization arguments
+        parser.add_argument('--num_iterations', type=int, help='Number of training iterations')
+        parser.add_argument('--cooldown_frac', type=float, help='Fraction of training for learning rate cooldown')
+        
+        # Architecture arguments
+        parser.add_argument('--tokenizer', type=str, help='Tokenizer file name in tokenizers/ directory')
+        parser.add_argument('--vocab_size', type=int, help='Vocabulary size')
+        parser.add_argument('--num_layers', type=int, help='Number of transformer layers')
+        parser.add_argument('--num_heads', type=int, help='Number of attention heads')
+        parser.add_argument('--model_dim', type=int, help='Model embedding dimension')
+        parser.add_argument('--head_dim', type=int, help='Dimension per attention head')
+        parser.add_argument('--mlp_ratio', type=int, help='MLP hidden dim ratio')
+        
+        # Other options
+        parser.add_argument('--use_fp8', action='store_true', help='Use FP8 computation (for H100s and newer)')
+        parser.add_argument('--no_fp8', action='store_false', dest='use_fp8', help='Disable FP8 computation')
+        parser.add_argument('--val_loss_every', type=int, help='Evaluate validation loss every N steps')
+        parser.add_argument('--save_model', action='store_true', help='Save model checkpoints')
+        parser.add_argument('--no_save_model', action='store_false', dest='save_model', help='Disable model checkpoints')
+        parser.add_argument('--model_name', type=str, help='Model name for logging')
+        
+        args = parser.parse_args()
+        
+        # Create a base instance with defaults
+        instance = cls()
+        
+        # Update instance with command-line arguments that were provided
+        for key, value in vars(args).items():
+            if value is not None:  # Only update if argument was provided
+                setattr(instance, key, value)
+        
+        # Run post_init validations after applying CLI arguments
+        instance.__post_init__()
+        
+        return instance, args
+
+# Parse arguments and create Hyperparameters instance
+args, cli_args = Hyperparameters.from_args()
 
 # Check if environment variables are set by torchrun, otherwise default to single GPU
 if "RANK" in os.environ and "WORLD_SIZE" in os.environ and "LOCAL_RANK" in os.environ:
@@ -596,27 +645,9 @@ if world_size > 1:
     dist.barrier()
 master_process = (rank == 0)  # this process will do logging, checkpointing etc.
 
-# begin logging
-logfile = None
-experiment_dir_path = None # Define experiment_dir_path outside the if block
-metrics_csv_path = None # Define metrics_csv_path
-if master_process:
-    start_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    # 1. Create the experiment directory name
-    experiment_dir_name = f"{start_time}_{args.model_name}_D={args.model_dim}_L={args.num_layers}_H={args.num_heads}"
-    # 2. Create the experiment directory path
-    experiment_dir_path = Path("experiments") / experiment_dir_name
-    os.makedirs(experiment_dir_path, exist_ok=True)
-    # 3. Set the logfile path inside the experiment directory
-    logfile = experiment_dir_path / "training_log.txt"
-    # 4. Set the metrics CSV file path
-    metrics_csv_path = experiment_dir_path / "metrics.csv"
-    print(f"Logging to: {logfile}")
-    print(f"Metrics CSV: {metrics_csv_path}")
-    # 5. Initialize metrics CSV file with headers
-    with open(metrics_csv_path, 'w', newline='') as csvfile:
-        writer = csv.writer(csvfile)
-        writer.writerow(["step", "type", "loss", "cumulative_time_ms", "step_avg_ms"])
+#################################################
+#########           logging           ###########
+#################################################
 
 def print0(s, console=False):
     # Ensure print0 works even if not master_process (but does nothing)
@@ -626,10 +657,35 @@ def print0(s, console=False):
                 print(s)
             print(s, file=f)
 
-#################################################
-######### copying all relevant files  ###########
-#################################################
-if master_process and experiment_dir_path:
+# begin logging
+logfile = None
+experiment_dir_path = None # Define experiment_dir_path outside the if block
+metrics_csv_path = None # Define metrics_csv_path
+if master_process:
+    start_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    # 1. Create the experiment directory name
+    experiment_dir_name = (f"{start_time}_{args.model_name}")
+    # 2. Create the experiment directory path
+    experiment_dir_path = Path("experiments") / experiment_dir_name
+    os.makedirs(experiment_dir_path, exist_ok=True)
+    # 3. Set the logfile path inside the experiment directory
+    logfile = experiment_dir_path / "training_log.txt"
+    # 4. Set the metrics CSV file path
+    metrics_csv_path = experiment_dir_path / "metrics.csv"
+    print0(f"Logging to: {logfile}", console=True)
+    print0(f"Metrics CSV: {metrics_csv_path}", console=True)
+    # 5. Initialize metrics CSV file with headers
+    with open(metrics_csv_path, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(["step", "type", "loss", "cumulative_time_ms", "step_avg_ms"])
+    # 6. Log any command-line arguments that were provided (overriding defaults)
+    cli_arg_dict = {k: v for k, v in vars(cli_args).items() if v is not None}
+    if cli_arg_dict:
+        print0("Command-line arguments overriding defaults:", console=True)
+        for key, value in cli_arg_dict.items():
+            print0(f"  --{key} = {value}", console=True)
+        print0("="*100, console=True)
+
     print0("Copying relevant files to experiment directory...")
     files_to_copy = ["requirements.txt", sys.argv[0], "download_hellaswag.py", "download_fineweb.py"]
     for file_path_str in files_to_copy:
@@ -799,7 +855,7 @@ def sample_from_model(model, prompt, max_new_tokens=100, temperature=0.8, top_k=
     # Encode the prompt
     input_ids = encode(prompt)
     x = torch.tensor(input_ids, dtype=torch.int32, device="cuda")
-    print0(f'sample_from_model input_ids.shape {x.shape}')
+
     # Generate
     model.eval()
     with torch.no_grad():

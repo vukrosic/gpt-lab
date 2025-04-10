@@ -67,7 +67,7 @@ def main():
     parser.add_argument("-v", "--version", type=str, default="10Bedu", help="Which version of fineweb to use? 10B|100B|10Bedu|100Bedu (default 10Bedu)")
     parser.add_argument("-ss", "--shard_size", type=int, default=10**8, help="Size of each shard in tokens (default 100 million)")
     parser.add_argument("-ns", "--num_shards", type=int, default=None, help="Maximum number of shards to create (defaults to entire dataset)")
-    parser.add_argument("-t", "--tokenizer", type=str, default=None, help="Filename of custom tokenizer (no default)")
+    parser.add_argument("-t", "--tokenizer", type=str, default="gpt4regex_v50256_n134217728", help="Filename of custom tokenizer (no default)")
     args = parser.parse_args()
     assert args.tokenizer[-4:] == ".pkl", f"tokenizer must be .pkl"
 

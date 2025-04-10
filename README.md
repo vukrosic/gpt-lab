@@ -1,39 +1,41 @@
-# NanoGPT-Lab (WIP)
-this repo is a massive overhaul of [Modded-NanoGPT](https://github.com/KellerJordan/modded-nanogpt) with the goal of being a base for cheap & easy LLM experiments. I overhauled the modded version rather than the original because the former is WAY faster, and therefore cheaper which makes it more accessible for amateur scientists.
+# NanoGPT-Lab **(BETA)**
+this repo is a massive overhaul of [Modded-NanoGPT](https://github.com/KellerJordan/modded-nanogpt) with the goal of being a base for amateurs to do cheap & easy LLM experiments at any scale. 
+
+**this repo is currently in beta, meaning that I think it's pretty workable but have not utilized it on enough of my own projects to guarantee that. before taking it out of beta I will 1) implement the further improvements already defined in the todo section below and 2) go and implement a few ideas and use what I learn to improve this codebase**
+
+## features
+- an architecture that trains *very fast*
+- an optimizer that uses *very little* memory
+- a fully from-scratch BPE tokenizer implementation
 
 ## instructions 
-### (single GPU)
+The input arguments in these instructions are comically small values designed to work on the tiniest GPU for demonstration purposes to get you up and running. In practice you'll have to tune them to properly utilize the available VRAM of your setup. Also, in the below instructions, `G` is the number of GPUs you have
+
 1. `pip install -r requirements.txt`
 2. samples is the number of characters to train on
+```single GPU
+python train_tokenizer.py --samples 100000 --vocabsize 1000 --name mytokenizer --demo
 ```
-python train_tokenizer.py --samples 10000000 --vocabsize 8191 --name mytokenizer --demo
-```
-3. dataset options are 10B, 100B, 10Bedu (default), or 100Bedu. tune the shard size (default 100mil) and number of shards to the number of shards to your desired training run length. the script will only create one validation shard which is not included in the count of num_shards
-```
-python download_fineweb.py --version 10B --shard_size 50000000 --num_shards 100 --tokenizer mytokenizer_v8191_n10000000.pkl
-```
-4. `python download_hellaswag.py`
-5. Open `train_gpt.py` and tune the hyperparameters to your liking. 
-    *WARNING: if you set save_model=True that will create a .pt file, but by default the .gitignore will cause this to not be pushed with the rest of the repo, meaning you have to find a way to save it manually. This is done because the filesize is too large for github*
-6. `python train_gpt.py`
-
-### (multiple GPUS where G is the quantity you have)
-1. `pip install -r requirements.txt`
-2. samples is the number of characters to train on PER GPU, so the actual quantity you'll train on is samples * G
-```
+```multiple GPUs
 torchrun --nproc_per_node=2 train_tokenizer.py --samples 10000000 --vocabsize 8191 --name mytokenizer --demo
 ```
 3. dataset options are 10B, 100B, 10Bedu (default), or 100Bedu. tune the shard size (default 100mil) and number of shards to the number of shards to your desired training run length. the script will only create one validation shard which is not included in the count of num_shards
 ```
-python download_fineweb.py --version 10B --shard_size 50000000 --num_shards 100 --tokenizer mytokenizer_v8191_n10000000.pkl
+python download_fineweb.py --version 10B --shard_size 10000000 --num_shards 1 --tokenizer mytokenizer_v1000_n100000.pkl
 ```
 4. `python download_hellaswag.py`
-5. Open `train_gpt.py` and tune the hyperparameters to your liking. 
-    *WARNING: if you set save_model=True that will create a .pt file, but by default the .gitignore will cause this to not be pushed with the rest of the repo, meaning you have to find a way to save it manually. This is done because the filesize is too large for github*
-6. `torchrun --nproc_per_node=G train_gpt.py`
+5. Open `train_gpt.py` and tune the hyperparameters to your liking, or override the defaults using input arguments. 
+```single GPU
+python train_gpt.py --name myGPT --tokenizer mytokenizer_v1000_n10000.pkl --vocab_size 1001 --model_dim 128 --num_heads 4 --num_layers 6
+```
+```multiple GPUs
+torchrun --nproc_per_node=G train_gpt.py --name myGPT --tokenizer mytokenizer_v1000_n10000.pkl --vocab_size 1001 --model_dim 128 --num_heads 4 --num_layers 6
+```
+    - Note: vocabulary size must be equial to your tokenizer size PLUS any special tokens defined in this script (1 for '<|endoftext|>', so 1000 + 1 = 10001)
+    - **WARNING:** if you set save_model=True that will create a .pt file, but by default the .gitignore will cause this to not be pushed with the rest of the repo, meaning you have to find a way to save it manually. This is done because the filesize is too large for github
+6. once all that is confirmed to be up & working, start editing the code and running your experiments
 
-
-## todos:
+## todos / planned features:
 - [x] integrate generate()
     - [x] make forward() work w/ both inference & training
     - [x] make inference causal mask next multiple of 128
@@ -68,17 +70,24 @@ python download_fineweb.py --version 10B --shard_size 50000000 --num_shards 100 
     - [x] setup for multi-gpu training
         - [x] figure out how to use streaming=True with multiple GPUs
 - [x] switch experiment output from single text file to folder with csv file of loss, model weights, etc
+- [ ] create simple test script
+    - [x] add option to manipulate train_gpt.py hyperparameters through input args so that script can use tiny test
 - [ ] implement [[DAGSeq2DAGSeq]] to test & learn more about how this repo should work
+- [ ] architecture edits
+    - [ ] adjust value embeddings to dynamically account for different number of layers
+    - [ ] remove simple doc-causal attention mask and re-implement moddedGPT's original masks that alternate bw full causal & sliding window and increase window size over the course of training
+        - [ ] make full-sliding pattern dynamically account for different number of layers
 - [ ] calc runtime of 10B? tokens on 8xH100 & therefore cost of doing research
 - [ ] add batched inference
     - [ ] use to speed up hellaswag
 - [ ] excessively comment all the Modded-NanoGPT specific architecture edits to explain what's happening
+    - [ ] ensure consistency in style across documents (eg. choose between (B,N,D) and (batch_size, seq_len, model_dim))
 - [ ] make NanoGPT and Llama3 versions for those who want to work off of those as a base. They'd be less bang for your buck but good for people who want a more familiar baseline rather than all the weird tricks in moddedGPT
 - [ ] more benchmarks? api calls to a smarter LLM for mass comparisons?
 - [ ] write latex preprint skeleton
     - [ ] moddedGPT architecture specifics in an appendix
     - [ ] auto-generated loss curves & benchmark tables
-- [ ] post-training?
+- [ ] post-training/RL?
 
 # Modded-NanoGPT (ORIGINAL README)
 

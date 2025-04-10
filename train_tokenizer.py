@@ -37,7 +37,7 @@ else:
     os.environ["MASTER_PORT"] = "29500"
 print(f"Running with {world_size} GPU(s)")
 if world_size == 1:
-    print("To run with multiple GPUs, use `torchrun --nproc_per_node=N train_tokenizer.py`")
+    print("To run with multiple GPUs where number of GPUs is G, use `torchrun --nproc_per_node=G train_tokenizer.py`")
 assert torch.cuda.is_available()
 device = torch.device("cuda", local_rank)
 torch.cuda.set_device(device)
