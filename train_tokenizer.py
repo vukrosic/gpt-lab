@@ -312,7 +312,8 @@ def fetch_fineweb_data(max_chars: int = 2**22):
                            name="sample-10BT", 
                            split="train", 
                            streaming=True)
-    dataset = split_dataset_by_node(dataset, rank=rank, world_size=world_size)
+    if world_size > 1:
+        dataset = split_dataset_by_node(dataset, rank=rank, world_size=world_size)
     
     text_data = []
     doc_lengths = []
