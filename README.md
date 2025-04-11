@@ -6,17 +6,21 @@ this repo is a massive overhaul of [Modded-NanoGPT](https://github.com/KellerJor
 ## features
 - an architecture that trains *very fast*
 - an optimizer that uses *very little* memory
-- a fully from-scratch BPE tokenizer implementation
+- a fully from-scratch BPE tokenizer implementation that's *very fast* and memory efficient
+- logging and code state saving for each experiment you run
+- benchmarking (hellaswag)
 
 ## instructions 
 The input arguments in these instructions are comically small values designed to work on the tiniest GPU for demonstration purposes to get you up and running; in practice you'll have to tune them to properly utilize the available VRAM of your setup. Also, in the below instructions, `G` is the number of GPUs you have
 
 1. `pip install -r requirements.txt`
 2. samples is the number of characters to train on
-```single GPU
+single GPU:
+```
 python train_tokenizer.py --samples 100000 --vocabsize 1000 --name mytokenizer --demo
 ```
-```multiple GPUs
+multiple GPUs:
+```
 torchrun --nproc_per_node=G train_tokenizer.py --samples 100000 --vocabsize 1000 --name mytokenizer --demo
 ```
 3. dataset options are 10B, 100B, 10Bedu (default), or 100Bedu. tune the shard size (default 100mil) and number of shards to the number of shards to your desired training run length. the script will only create one validation shard which is not included in the count of num_shards
@@ -25,17 +29,17 @@ python download_fineweb.py --version 10B --shard_size 10000000 --num_shards 1 --
 ```
 4. `python download_hellaswag.py`
 5. Open `train_gpt.py` and tune the hyperparameters to your liking, or override the defaults using input arguments. 
-```single GPU
+single GPU:
+```
 python train_gpt.py --model_name myGPT --tokenizer mytokenizer_v1000_n100000.pkl --vocab_size 1001 --model_dim 128 --num_heads 4 --num_layers 6
 ```
-```multiple GPUs
+multiple GPUs:
+```
 torchrun --nproc_per_node=G train_gpt.py --model_name myGPT --tokenizer mytokenizer_v1000_n100000.pkl --vocab_size 1001 --model_dim 128 --num_heads 4 --num_layers 6
 ```
-    - Note: vocabulary size must be equial to your tokenizer size PLUS any special tokens defined in this script (1 for '<|endoftext|>', so 1000 + 1 = 10001)
-    - **WARNING:** if you set save_model=True that will create a .pt file, but by default the .gitignore will cause this to not be pushed with the rest of the repo, meaning you have to find a way to save it manually. This is done because the filesize is too large for github
+- Note: vocabulary size must be equial to your tokenizer size PLUS any special tokens defined in this script (1 for '<|endoftext|>', so 1000 + 1 = 10001)
+- **WARNING:** if you set save_model=True that will create a .pt file, but by default the .gitignore will cause this to not be pushed with the rest of the repo, meaning you have to find a way to save it manually. This is done because the filesize is too large for github
 6. once all that is confirmed to be up & working, start editing the code and running your experiments
-
-If you'd like to confirm all is working without running each command manually, do
 
 ## todos / planned features:
 - [x] integrate generate()
@@ -71,11 +75,15 @@ If you'd like to confirm all is working without running each command manually, d
     - [ ] ~~speed up w/ torch.compile~~
     - [x] setup for multi-gpu training
         - [x] figure out how to use streaming=True with multiple GPUs
+    - [ ] fix tensor shape bug that occurs on 4+ GPUs
+    - [ ] switch from world_size comparisons between GPUs to world_size^2 comparisons
+    - [ ] train a tokenizer
+    - [ ] switch token ordering from (0, 1, 2, 3,...) to (0, 1, -1, 2, -2, 3,...) in order to take full advantage of int16 and cut memory utilization in half for GPT2 sized vocabulary of 50256
     - [ ] make custom triton kernels to speed up & improve vram utilization
-        - have em operate in uint16 since pytorch doesn't support it?
     - [ ] make default dataset size auto-estimate GPU vram that'll be taken up & set to fill it up
 - [x] switch experiment output from single text file to folder with csv file of loss, model weights, etc
 - [x] add option to manipulate train_gpt.py hyperparameters through input args
+- [ ] implement optional gradient accumulation
 - [ ] **implement [[DAGSeq2DAGSeq]] to test & learn more about how this repo should work**
 - [ ] excessively comment all the Modded-NanoGPT specific architecture edits to explain what's happening
     - [ ] ensure consistency in style across documents (eg. choose between (B,N,D) and (batch_size, seq_len, model_dim))
