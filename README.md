@@ -14,7 +14,7 @@ this repo is a massive overhaul of [Modded-NanoGPT](https://github.com/KellerJor
 The input arguments in these instructions are comically small values designed to work on the tiniest GPU for demonstration purposes to get you up and running; in practice you'll have to tune them to properly utilize the available VRAM of your setup. Also, in the below instructions, `G` is the number of GPUs you have
 
 1. `pip install -r requirements.txt`
-2. samples is the number of characters to train on
+2. samples is the number of text characters to train on (shared evenly across all GPUs). vocabulary size should exclude any special tokens you plan on using
 
 single GPU:
 ```
@@ -77,9 +77,9 @@ torchrun --nproc_per_node=G train_gpt.py --model_name myGPT --tokenizer mytokeni
     - [ ] ~~speed up w/ torch.compile~~
     - [x] setup for multi-gpu training
         - [x] figure out how to use streaming=True with multiple GPUs
-    - [ ] fix tensor shape bug that occurs on 4+ GPUs
-    - [ ] switch from world_size comparisons between GPUs to world_size^2 comparisons
-    - [ ] train a tokenizer
+    - [x] fix tensor shape bug that occurs on 4+ GPUs
+    - [x] switch from world_size comparisons between GPUs to world_size^2 comparisons
+    - [ ] train a tokenizer so i can move on
     - [ ] switch token ordering from (0, 1, 2, 3,...) to (0, 1, -1, 2, -2, 3,...) in order to take full advantage of int16 and cut memory utilization in half for GPT2 sized vocabulary of 50256
     - [ ] make custom triton kernels to speed up & improve vram utilization
     - [ ] make default dataset size auto-estimate GPU vram that'll be taken up & set to fill it up

@@ -198,56 +198,64 @@ def bpe_train(
                     f"Supercalifragilisticexpialidocious antidisestablishmentarianism!!!")
         demo_words = [[bytes([b]) for b in word.encode("utf-8")] for word in regex.findall(pat_str, demo_text)]
 
-    progress_bar = tqdm(total=vocab_size - 256, unit="merges")
+    # the number of most common pairs on this GPU to be put up into consideration across all GPUs
+    k = world_size **2
+
     # Now, use our data to figure out which merges we should make
+    progress_bar = tqdm(total=vocab_size - 256, unit="merges")
     for j in range(256, vocab_size):
-        # find most common pair
+        # find frequency of all pairs
         pairs = torch.stack((ids[:-1], ids[1:]), dim=0) # (2, words_in_data * (avg_word_len + 1))
         unique, counts = torch.unique(pairs, return_counts=True, dim=1)
             # shapes (2, words_in_data * (avg_word_len + 1)) and (words_in_data * (avg_word_len + 1))
+        
+        # use -1 separator between words to ensure we follow regex
         valid_mask = torch.all(unique != -1, dim=0) # (very_long) where very_long < words_in_data * (avg_word_len + 1)
         unique = unique[:, valid_mask] # (2, very_long)
         counts = counts[valid_mask] # (very_long)
-        counts, sort_idx = torch.sort(counts, descending=True) # (very_long) and (very_long)
-        #pairs_idx = sort_idx[rank * world_size:(rank + 1) * world_size] # shape (world_size)
-        pairs_idx = sort_idx[:world_size] # shape (world_size)
-        most_common_pairs_local = unique[:, pairs_idx] # (2, world_size)
-        #counts_local = counts[:pairs_idx] # (world_size)
-        counts_local = counts[:world_size]# (world_size)
-        most_common_pairs_global = torch.zeros((2,world_size ** 2), dtype=torch.float32, device=device)
-        counts_global = torch.zeros(world_size ** 2, dtype=torch.float32, device=device)
-        most_common_pairs_global[:, rank * world_size:(rank + 1) * world_size] = most_common_pairs_local.to(torch.float32)
-        counts_global[rank * world_size:(rank + 1) * world_size] = counts_local.to(torch.float32)
-        
+
         if world_size > 1:
+            # select top k pairs to go into consideration
+            counts, sort_idx = torch.sort(counts, descending=True) # (very_long) and (very_long)
+            pairs_idx = sort_idx[:k] # shape (k)
+            most_common_pairs_local = unique[:, pairs_idx] # (2, k)
+            counts_local = counts[:k]# (k)
+            
+            # communicate between GPUs
+            most_common_pairs_global = torch.zeros((2, k * world_size), dtype=torch.float32, device=device)
+            counts_global = torch.zeros(k * world_size, dtype=torch.float32, device=device)
+            most_common_pairs_global[:, rank * k : (rank + 1) * k] = most_common_pairs_local.to(torch.float32)
+            counts_global[rank * k : (rank + 1) * k] = counts_local.to(torch.float32)
             dist.all_reduce(most_common_pairs_global, op=dist.ReduceOp.SUM)
             dist.all_reduce(counts_global, op=dist.ReduceOp.SUM)
 
-        # First, get unique pairs and their counts from the combined data
-        pairs_global = most_common_pairs_global.t()  # Shape: [world_size^2, 2]
-        unique_pairs, inverse_indices = torch.unique(pairs_global, dim=0, return_inverse=True)
+            # get unique pairs and their counts from the combined data
+            unique_pairs, inverse_indices = torch.unique(most_common_pairs_global.t(), dim=0, return_inverse=True)
 
-        # Sum the counts for each unique pair
-        sum_counts = torch.zeros(unique_pairs.size(0), dtype=torch.float, device=device)
-        sum_counts.scatter_add_(0, inverse_indices, counts_global.float())
+            # Sum the counts for each unique pair
+            sum_counts = torch.zeros(unique_pairs.size(0), dtype=torch.float, device=device)
+            sum_counts.scatter_add_(0, inverse_indices, counts_global.float())
 
-        # Count occurrences of each unique pair
-        pair_occurrences = torch.bincount(inverse_indices)
+            # Count occurrences of each unique pair
+            pair_occurrences = torch.bincount(inverse_indices)
 
-        # Find the maximum occurrence count
-        max_occurrence = torch.max(pair_occurrences)
+            # Find the maximum occurrence count
+            max_occurrence = torch.max(pair_occurrences)
 
-        # Create a mask for pairs with the maximum occurrence count
-        max_occurrence_mask = (pair_occurrences == max_occurrence)
+            # Create a mask for pairs with the maximum occurrence count
+            max_occurrence_mask = (pair_occurrences == max_occurrence)
 
-        # Filter to only consider pairs with the maximum occurrence count
-        filtered_sum_counts = sum_counts[max_occurrence_mask]
-        filtered_unique_pairs = unique_pairs[max_occurrence_mask]
+            # Filter to only consider pairs with the maximum occurrence count
+            filtered_sum_counts = sum_counts[max_occurrence_mask]
+            filtered_unique_pairs = unique_pairs[max_occurrence_mask]
 
-        # Find the pair with the largest count among the filtered pairs
-        max_index = torch.argmax(filtered_sum_counts)
-        best_pair = filtered_unique_pairs[max_index].cpu().numpy() # Shape: (2)
-
+            # Find the pair with the largest count among the filtered pairs
+            max_index = torch.argmax(filtered_sum_counts)
+            best_pair = filtered_unique_pairs[max_index].cpu().numpy() # (2)
+        else:
+            pair_idx = torch.argmax(counts) # (1)
+            best_pair = unique[:, pair_idx].cpu().numpy() # (2)
+            
         # Map token IDs back to the corresponding byte sequences
         # Using the dictionary in reverse to get the bytes corresponding to these IDs
         best_bytes = [None, None]
@@ -273,7 +281,7 @@ def bpe_train(
             demo_words = slow_merge(demo_words, tuple(best_bytes), token_bytes)
 
             # See the intermediate merges play out!
-            if j % 500 == 0 or j in [256, vocab_size - 1]:
+            if j % 1000 == 0 or j in [256, vocab_size - 1]:
                 print(f"\nThe most common pair {best_pair[0]} + {best_pair[1]} "
                         f"which makes {token_bytes} our {len(ranks)}th token")
                 # Flatten the demo words into a single list of tokens for visualization
@@ -394,8 +402,6 @@ def train_simple_encoding(sample_size: int, vocab_size: int, demo: bool = False)
         The trained tokenizer
     """
     data = fetch_fineweb_data(max_chars=sample_size)
-    # loading data can take awhile so make sure we're all caught up
-    dist.barrier()
     
     #gpt2_pattern = (r"""'s|'t|'re|'ve|'m|'ll|'d| ?[\p{L}]+| ?[\p{N}]+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
     gpt4_pattern = (
@@ -445,7 +451,8 @@ def save_tokenizer(enc, name, vocab_size, sample_size):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a custom BPE tokenizer")
     parser.add_argument("-n", "--samples", type=int, default=2**27, 
-        help="Maximum number of text characters to use PER GPU for training (default 2^27 should fit on 8gb of VRAM)")
+        help=(f"Maximum number of text characters to use (across all GPUs)"
+            f" for training (default 2^27 should fit on single GPU with 8gb of VRAM)"))
     parser.add_argument("-v", "--vocabsize", type=int, default=50256, 
         help="Size of the vocabulary to train (default 50256; same as GPT2 minus <|endoftext|>)")
     parser.add_argument("-f", "--name", type=str, default="gpt4regex", 
