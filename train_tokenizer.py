@@ -205,28 +205,17 @@ def bpe_train(
         pairs = torch.stack((ids[:-1], ids[1:]), dim=0) # (2, words_in_data * (avg_word_len + 1))
         unique, counts = torch.unique(pairs, return_counts=True, dim=1)
             # shapes (2, words_in_data * (avg_word_len + 1)) and (words_in_data * (avg_word_len + 1))
-        #if rank == 1: 
-        print(rank, "unqie & counts", unique.shape, counts.shape)
         valid_mask = torch.all(unique != -1, dim=0) # (very_long) where very_long < words_in_data * (avg_word_len + 1)
         unique = unique[:, valid_mask] # (2, very_long)
         counts = counts[valid_mask] # (very_long)
-        #if rank == 1: 
-        print(rank, "unique & counts", unique.shape, counts.shape)
         counts, sort_idx = torch.sort(counts, descending=True) # (very_long) and (very_long)
-        #if rank == 1: 
-        print(rank, "counts & sort_idx", counts.shape, sort_idx.shape)
         #pairs_idx = sort_idx[rank * world_size:(rank + 1) * world_size] # shape (world_size)
         pairs_idx = sort_idx[:world_size] # shape (world_size)
         most_common_pairs_local = unique[:, pairs_idx] # (2, world_size)
         #counts_local = counts[:pairs_idx] # (world_size)
         counts_local = counts[:world_size]# (world_size)
-        #if rank == 1: 
-        print(rank, "pairs_idx, most_common_pairs_local, & counts_local", 
-                            pairs_idx.shape, most_common_pairs_local.shape, counts_local.shape,)
         most_common_pairs_global = torch.zeros((2,world_size ** 2), dtype=torch.float32, device=device)
         counts_global = torch.zeros(world_size ** 2, dtype=torch.float32, device=device)
-        #if rank == 1: 
-        print(rank, "most_common_pairs_global & counts_global", most_common_pairs_global.shape, counts_global.shape)
         most_common_pairs_global[:, rank * world_size:(rank + 1) * world_size] = most_common_pairs_local.to(torch.float32)
         counts_global[rank * world_size:(rank + 1) * world_size] = counts_local.to(torch.float32)
         
@@ -285,7 +274,7 @@ def bpe_train(
 
             # See the intermediate merges play out!
             if j % 500 == 0 or j in [256, vocab_size - 1]:
-                print(f"The most common pair {best_pair[0]} + {best_pair[1]} "
+                print(f"\nThe most common pair {best_pair[0]} + {best_pair[1]} "
                         f"which makes {token_bytes} our {len(ranks)}th token")
                 # Flatten the demo words into a single list of tokens for visualization
                 demo_tokens = [token for word in demo_words for token in word]
@@ -319,38 +308,77 @@ def visualise_tokens(token_values: list[bytes]) -> None:
 
 
 def fetch_fineweb_data(max_chars: int = 2**22):
-    # Use the 10B version of FineWeb; not edu since the former should have more diverse tokens
-    dataset = load_dataset("HuggingFaceFW/fineweb", 
-                           name="sample-10BT", 
-                           split="train", 
-                           streaming=True)
-    if world_size > 1:
-        dataset = split_dataset_by_node(dataset, rank=rank, world_size=world_size)
+    """Fetch data from FineWeb dataset for tokenizer training"""
+    # Create a local cache directory
+    data_dir = os.path.join(os.path.dirname(__file__), "data")
+    os.makedirs(data_dir, exist_ok=True)
     
-    text_data = []
-    doc_lengths = []
-    tot_len = 0
-    for i, item in enumerate(dataset):
-        tot_len += len(item["text"])
-        if tot_len >= max_chars:
-            tot_len -= len(item["text"])
-            break
-        text_data.append(item["text"])
-        doc_lengths.append(len(item["text"]))
+    # Include max_chars in the filename for size-specific caching
+    local_data_path = os.path.join(data_dir, f"tokenizer_training_data_{max_chars}.txt")
     
-    # Show statistics if requested
+    # Only the master process downloads the data
     if rank == 0:
-        print(f"\nDataset Statistics for GPU {rank}:"
-            f"\nTotal documents: {len(text_data)}"
-            f"\nTotal characters: {sum(doc_lengths):,}"
-            f"\nAverage document length: {np.mean(doc_lengths):.1f} characters"
-            f"\nMedian document length: {np.median(doc_lengths):.1f} characters"
-            f"\nShortest document: {min(doc_lengths)} characters"
-            f"\nLongest document: {max(doc_lengths):,} characters"
-            f"\nStandard deviation: {np.std(doc_lengths):.1f} characters")
+        should_download = False
+        
+        if not os.path.exists(local_data_path):
+            should_download = True
+            print(f"No cached data found for size {max_chars}, downloading...")
+        
+        if should_download:
+            print(f"Downloading FineWeb data to {local_data_path}...")
+            # Download data only once from the dataset
+            dataset = load_dataset("HuggingFaceFW/fineweb", 
+                                  name="sample-10BT", 
+                                  split="train", 
+                                  streaming=True)
+            
+            text_data = []
+            doc_lengths = []
+            tot_len = 0
+            for item in dataset:
+                tot_len += len(item["text"])
+                if tot_len >= max_chars:
+                    tot_len -= len(item["text"])
+                    break
+                text_data.append(item["text"])
+                doc_lengths.append(len(item["text"]))
+            
+            # Show statistics if requested
+            print(f"\nDataset Statistics:"
+                f"\nTotal documents: {len(text_data)}"
+                f"\nTotal characters: {sum(doc_lengths):,}"
+                f"\nAverage document length: {np.mean(doc_lengths):.1f} characters"
+                f"\nMedian document length: {np.median(doc_lengths):.1f} characters"
+                f"\nShortest document: {min(doc_lengths)} characters"
+                f"\nLongest document: {max(doc_lengths):,} characters"
+                f"\nStandard deviation: {np.std(doc_lengths):.1f} characters")
+            
+            # Save the combined text to a file
+            with open(local_data_path, 'w', encoding='utf-8') as f:
+                f.write("\n".join(text_data))
+            print(f"Data saved to {local_data_path}")
+        else:
+            print(f"Using existing data from {local_data_path}")
     
-    # Join all text data into a single string
-    return "\n".join(text_data)
+    # Make sure all processes wait until the data is downloaded
+    if world_size > 1:
+        dist.barrier()
+    
+    # All processes read from the local file
+    with open(local_data_path, 'r', encoding='utf-8') as f:
+        data = f.read()
+    
+    # Shard the data for distributed processing if needed
+    if world_size > 1:
+        # Simple way to shard the data: split by character count
+        data_size = len(data)
+        shard_size = data_size // world_size
+        start = rank * shard_size
+        end = start + shard_size if rank < world_size - 1 else data_size
+        data = data[start:end]
+        print(f"Rank {rank}: Processing {len(data):,} characters ({start:,} to {end:,})")
+    
+    return data
 
 
 def train_simple_encoding(sample_size: int, vocab_size: int, demo: bool = False):
@@ -366,7 +394,9 @@ def train_simple_encoding(sample_size: int, vocab_size: int, demo: bool = False)
         The trained tokenizer
     """
     data = fetch_fineweb_data(max_chars=sample_size)
-
+    # loading data can take awhile so make sure we're all caught up
+    dist.barrier()
+    
     #gpt2_pattern = (r"""'s|'t|'re|'ve|'m|'ll|'d| ?[\p{L}]+| ?[\p{N}]+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
     gpt4_pattern = (
         r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
@@ -433,5 +463,5 @@ if __name__ == "__main__":
     
     # Save the tokenizer
     if master_process:
-        save_tokenizer(enc, args.name, args.vocabsize, args.samples * world_size)
+        save_tokenizer(enc, args.name, args.vocabsize, args.samples)
     

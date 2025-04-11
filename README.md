@@ -15,6 +15,7 @@ The input arguments in these instructions are comically small values designed to
 
 1. `pip install -r requirements.txt`
 2. samples is the number of characters to train on
+
 single GPU:
 ```
 python train_tokenizer.py --samples 100000 --vocabsize 1000 --name mytokenizer --demo
@@ -29,6 +30,7 @@ python download_fineweb.py --version 10B --shard_size 10000000 --num_shards 1 --
 ```
 4. `python download_hellaswag.py`
 5. Open `train_gpt.py` and tune the hyperparameters to your liking, or override the defaults using input arguments. 
+
 single GPU:
 ```
 python train_gpt.py --model_name myGPT --tokenizer mytokenizer_v1000_n100000.pkl --vocab_size 1001 --model_dim 128 --num_heads 4 --num_layers 6
@@ -39,7 +41,7 @@ torchrun --nproc_per_node=G train_gpt.py --model_name myGPT --tokenizer mytokeni
 ```
 - Note: vocabulary size must be equial to your tokenizer size PLUS any special tokens defined in this script (1 for '<|endoftext|>', so 1000 + 1 = 10001)
 - **WARNING:** if you set save_model=True that will create a .pt file, but by default the .gitignore will cause this to not be pushed with the rest of the repo, meaning you have to find a way to save it manually. This is done because the filesize is too large for github
-6. once all that is confirmed to be up & working, start editing the code and running your experiments
+6. once all that is confirmed to be up & working, start editing the code and running your own experiments
 
 ## todos / planned features:
 - [x] integrate generate()
