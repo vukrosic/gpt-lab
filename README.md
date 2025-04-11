@@ -18,26 +18,26 @@ The input arguments in these instructions are comically small values designed to
 
 single GPU:
 ```
-python train_tokenizer.py --samples 100000 --vocabsize 1000 --name mytokenizer --demo
+python train_tokenizer.py --samples 100000 --vocabsize 1000 --name readmetokenizer --demo
 ```
 multiple GPUs (replace G):
 ```
-torchrun --nproc_per_node=G train_tokenizer.py --samples 100000 --vocabsize 1000 --name mytokenizer --demo
+torchrun --nproc_per_node=G train_tokenizer.py --samples 100000 --vocabsize 1000 --name readmetokenizer --demo
 ```
 3. dataset options are 10B, 100B, 10Bedu (default), or 100Bedu. tune the shard size (default 100mil) and number of shards to the number of shards to your desired training run length. the script will only create one validation shard which is not included in the count of num_shards
 ```
-python download_fineweb.py --version 10B --shard_size 10000000 --num_shards 1 --tokenizer mytokenizer_v1000_n100000.pkl
+python download_fineweb.py --version 10B --shard_size 10000000 --num_shards 1 --tokenizer readmetokenizer_v1000_n100000.pkl
 ```
 4. `python download_hellaswag.py`
 5. Open `train_gpt.py` and tune the hyperparameters to your liking, or override the defaults using input arguments. 
 
 single GPU:
 ```
-python train_gpt.py --model_name ReadmeGPT --tokenizer mytokenizer_v1000_n100000.pkl --vocab_size 1001 --model_dim 128 --num_heads 4 --num_layers 6
+python train_gpt.py --model_name ReadmeGPT --tokenizer readmetokenizer_v1000_n100000.pkl --vocab_size 1001 --model_dim 128 --num_heads 4 --num_layers 6
 ```
 multiple GPUs (replace G):
 ```
-torchrun --nproc_per_node=G train_gpt.py --model_name ReadmeGPT --tokenizer mytokenizer_v1000_n100000.pkl --vocab_size 1001 --model_dim 128 --num_heads 4 --num_layers 6
+torchrun --nproc_per_node=G train_gpt.py --model_name ReadmeGPT --tokenizer readmetokenizer_v1000_n100000.pkl --vocab_size 1001 --model_dim 128 --num_heads 4 --num_layers 6
 ```
 - Note: vocabulary size must be equial to your tokenizer size PLUS any special tokens defined in this script (1 for '<|endoftext|>', so 1000 + 1 = 10001)
 - **WARNING:** if you set save_model=True that will create a .pt file, but by default the .gitignore will cause this to not be pushed with the rest of the repo, meaning you have to find a way to save it manually. This is done because the filesize is too large for github
@@ -81,21 +81,21 @@ torchrun --nproc_per_node=G train_gpt.py --model_name ReadmeGPT --tokenizer myto
     - [x] switch from world_size comparisons between GPUs to world_size^2 comparisons
     - [x] train a tokenizer so i can move on
     - [ ] switch token ordering from (0, 1, 2, 3,...) to (0, 1, -1, 2, -2, 3,...) in order to take full advantage of int16 and cut memory utilization in half for GPT2 sized vocabulary of 50256
-    - [ ] make custom triton kernels to speed up & improve vram utilization
+    - [ ] triton kernels to speed up & improve vram utilization
     - [ ] make default dataset size auto-estimate GPU vram that'll be taken up & set to fill it up
 - [x] switch experiment output from single text file to folder with csv file of loss, model weights, etc
 - [x] add option to manipulate train_gpt.py hyperparameters through input args
 - [x] implement optional gradient accumulatio
 - [ ] confirm still works on 
     - [ ] A100s
-        - [ ] single
+        - [x] single
         - [ ] DDP
+            - [ ] fix flex-attention bwd compile bug when using torch.compile
     - [ ] H100s
         - [x] single GPU
             - [x] fp8 works
-            - [ ] fix flex-attention bwd compile bug when using torch.compile
-                - [x] temporarily disable torch.compile on hopper GPUs in the meantime
         - [ ] DDP
+            - [ ] fix flex-attention bwd compile bug when using torch.compile
 - [ ] **implement [[DAGSeq2DAGSeq]] to test & learn more about how this repo should work**
 - [ ] excessively comment all the Modded-NanoGPT specific architecture edits to explain what's happening
     - [ ] ensure consistency in style across documents (eg. choose between (B,N,D) and (batch_size, seq_len, model_dim))

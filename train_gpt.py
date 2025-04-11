@@ -23,7 +23,7 @@ from torch import Tensor, nn
 import torch.nn.functional as F
 import torch.distributed as dist
 from torch.nn.attention.flex_attention import BlockMask, flex_attention, create_block_mask
-
+#torch._inductor.config.max_autotune_gemm_backends = ["ATEN"]
 # -----------------------------------------------------------------------------
 # Custom operators: FP8 matmul by @YouJiacheng
 
@@ -546,9 +546,9 @@ class Hyperparameters:
     tokenizer = "gpt4regex_v50256_n30000000.pkl"#134217728.pkl" # any .pkl file in tokenizers/
     vocab_size = 50257 # should be the tokenizer's size plus any special tokens defined in this script
     # model size - new parameters for GPUs w/ at least 8GB VRAM during testing
-    num_layers = 6  # 124m param model should be 12
+    num_layers = 12  # 124m param model should be 12
     num_heads = 6   # 124m param model should be 6
-    model_dim = 384  # must be divisible by num_heads
+    model_dim = 768  # must be divisible by num_heads
     head_dim = None  # if None, will be set to model_dim // num_heads
     mlp_ratio = 4  # 124m param model should be 4
     # memory optimization 
@@ -797,9 +797,7 @@ def get_lr(step: int):
         return w * 1.0 + (1 - w) * 0.1
 
 # Use a more memory-efficient compilation option
-# Disable torch.compile on hopper GPUs for now as it's causing tensor dimension issues
-if not args.hopper:
-    model: nn.Module = torch.compile(model, dynamic=False, mode="reduce-overhead")
+model: nn.Module = torch.compile(model, dynamic=False, mode="reduce-overhead")
 
 # Add fallback mode to handle compilation errors
 import torch._dynamo
