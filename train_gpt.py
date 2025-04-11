@@ -528,28 +528,31 @@ def distributed_data_generator(filename_pattern: str, batch_size: int, rank: int
 
 @dataclass
 class Hyperparameters:
-    model_name = "Modded-NanoGPT"
+    """
+    default values are set to fit on a GPU w/ 8GB of VRAM, but are not necessarily optimal
+    """
+    model_name = "ModdedGPT"
     # data
     train_files = "data/fineweb*_train_*.bin" # input .bin to train on
     val_files = "data/fineweb*_val_*.bin" # input .bin to eval validation loss on
     val_tokens = 10485760 # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
-    train_seq_len = 8*1024 # FlexAttention sequence length - reduced from 48*1024 for GPUs w/ at least 8GB VRAM during testing
-    val_seq_len = 12*1024 # FlexAttention sequence length for validation - reduced from 4*64*1024
+    train_seq_len = 8*1024 # FlexAttention sequence length
+    val_seq_len = 12*1024 # FlexAttention sequence length for validation
     # optimization
     train_steps = 20#_000 # number of training steps to run
     grad_acc_steps = 1 # number of gradient accumulation steps per training step
     cooldown_frac = 0.4 # fraction of training spent cooling down the learning rate
     # architecture
-    tokenizer = "gpt4regex_v50256_n134217728.pkl" # any .pkl file in tokenizers/
+    tokenizer = "gpt4regex_v50256_n30000000.pkl"#134217728.pkl" # any .pkl file in tokenizers/
     vocab_size = 50257 # should be the tokenizer's size plus any special tokens defined in this script
     # model size - new parameters for GPUs w/ at least 8GB VRAM during testing
-    num_layers = 12  # 124m param model should be 12
+    num_layers = 6  # 124m param model should be 12
     num_heads = 6   # 124m param model should be 6
-    model_dim = 768  # must be divisible by num_heads
+    model_dim = 384  # must be divisible by num_heads
     head_dim = None  # if None, will be set to model_dim // num_heads
     mlp_ratio = 4  # 124m param model should be 4
-    # memory optimization for GPUs w/ at least 8GB VRAM during testing
-    use_fp8 = False # Set to True on H100s and newer, False on older
+    # memory optimization 
+    hopper = False # Set to True on H100s (and newer?) for improved performance, False on older
     # evaluation and logging
     val_loss_every = 100 # every how many steps to evaluate val loss? 0 for only at the end
     save_model = False
@@ -593,8 +596,8 @@ class Hyperparameters:
         parser.add_argument('--mlp_ratio', type=int, help='MLP hidden dim ratio')
         
         # Other options
-        parser.add_argument('--use_fp8', action='store_true', help='Use FP8 computation (for H100s and newer)')
-        parser.add_argument('--no_fp8', action='store_false', dest='use_fp8', help='Disable FP8 computation')
+        parser.add_argument('--hopper', action='store_true', help='Set to true on H100s (and newer?) for improved performance')
+        parser.add_argument('--not_hopper', action='store_false', dest='hopper', help='Use if not on a hopper GPU')
         parser.add_argument('--val_loss_every', type=int, help='Evaluate validation loss every N steps')
         parser.add_argument('--save_model', action='store_true', help='Save model checkpoints')
         parser.add_argument('--no_save_model', action='store_false', dest='save_model', help='Disable model checkpoints')
@@ -748,7 +751,7 @@ print0(f'{model.get_num_params()} parameters', console=True)
 print0(model)
 
 # Set FP8 option based on hyperparameters
-model.lm_head.use_fp8 = args.use_fp8
+model.lm_head.use_fp8 = args.hopper
 
 for m in model.modules():
     if isinstance(m, nn.Embedding):
@@ -794,8 +797,9 @@ def get_lr(step: int):
         return w * 1.0 + (1 - w) * 0.1
 
 # Use a more memory-efficient compilation option
-# Disable torch.compile for now as it's causing tensor dimension issues
-model: nn.Module = torch.compile(model, dynamic=False, mode="reduce-overhead")
+# Disable torch.compile on hopper GPUs for now as it's causing tensor dimension issues
+if not args.hopper:
+    model: nn.Module = torch.compile(model, dynamic=False, mode="reduce-overhead")
 
 # Add fallback mode to handle compilation errors
 import torch._dynamo

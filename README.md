@@ -85,7 +85,17 @@ torchrun --nproc_per_node=G train_gpt.py --model_name ReadmeGPT --tokenizer myto
     - [ ] make default dataset size auto-estimate GPU vram that'll be taken up & set to fill it up
 - [x] switch experiment output from single text file to folder with csv file of loss, model weights, etc
 - [x] add option to manipulate train_gpt.py hyperparameters through input args
-- [x] implement optional gradient accumulation
+- [x] implement optional gradient accumulatio
+- [ ] confirm still works on 
+    - [ ] A100s
+        - [ ] single
+        - [ ] DDP
+    - [ ] H100s
+        - [x] single GPU
+            - [x] fp8 works
+            - [ ] fix flex-attention bwd compile bug when using torch.compile
+                - [x] temporarily disable torch.compile on hopper GPUs in the meantime
+        - [ ] DDP
 - [ ] **implement [[DAGSeq2DAGSeq]] to test & learn more about how this repo should work**
 - [ ] excessively comment all the Modded-NanoGPT specific architecture edits to explain what's happening
     - [ ] ensure consistency in style across documents (eg. choose between (B,N,D) and (batch_size, seq_len, model_dim))
