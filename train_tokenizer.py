@@ -1,6 +1,8 @@
 """
 Built off of Tiktoken educational implementation 
 https://github.com/openai/tiktoken/blob/main/tiktoken/_educational.py
+and this pytorch implementation of karpathy's minbpe
+https://github.com/kuprel/minbpe-pytorch/tree/main
 """
 from __future__ import annotations
 import collections
@@ -199,7 +201,7 @@ def bpe_train(
         demo_words = [[bytes([b]) for b in word.encode("utf-8")] for word in regex.findall(pat_str, demo_text)]
 
     # the number of most common pairs on this GPU to be put up into consideration across all GPUs
-    k = world_size **2
+    k = world_size ** 3
 
     # Now, use our data to figure out which merges we should make
     progress_bar = tqdm(total=vocab_size - 256, unit="merges")
@@ -276,21 +278,20 @@ def bpe_train(
         keep_mask = (ids != -2)
         ids = ids[keep_mask]
 
-        if demo and master_process:
-            # Also apply the same merge to our demo text
-            demo_words = slow_merge(demo_words, tuple(best_bytes), token_bytes)
-
-            # See the intermediate merges play out!
-            if j % 1000 == 0 or j in [256, vocab_size - 1]:
-                print(f"\nThe most common pair {best_pair[0]} + {best_pair[1]} "
-                        f"which makes {token_bytes} our {len(ranks)}th token")
-                # Flatten the demo words into a single list of tokens for visualization
-                demo_tokens = [token for word in demo_words for token in word]
-                visualise_tokens(demo_tokens)
-                print("\n")
-
         if master_process:
             progress_bar.update(1)
+
+            if demo:
+                # Also apply the same merge to our demo text
+                demo_words = slow_merge(demo_words, tuple(best_bytes), token_bytes)
+
+                # See the intermediate merges play out!
+                if j % 1000 == 0 or j in [256, vocab_size - 1]:
+                    print(f"\nThe most common pair {best_pair[0]} + {best_pair[1]} "
+                            f"which makes {token_bytes} our {len(ranks)}th token")
+                    # Flatten the demo words into a single list of tokens for visualization
+                    demo_tokens = [token for word in demo_words for token in word]
+                    visualise_tokens(demo_tokens)
 
     return ranks
 

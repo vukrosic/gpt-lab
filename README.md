@@ -20,7 +20,7 @@ single GPU:
 ```
 python train_tokenizer.py --samples 100000 --vocabsize 1000 --name mytokenizer --demo
 ```
-multiple GPUs:
+multiple GPUs (replace G):
 ```
 torchrun --nproc_per_node=G train_tokenizer.py --samples 100000 --vocabsize 1000 --name mytokenizer --demo
 ```
@@ -33,11 +33,11 @@ python download_fineweb.py --version 10B --shard_size 10000000 --num_shards 1 --
 
 single GPU:
 ```
-python train_gpt.py --model_name myGPT --tokenizer mytokenizer_v1000_n100000.pkl --vocab_size 1001 --model_dim 128 --num_heads 4 --num_layers 6
+python train_gpt.py --model_name ReadmeGPT --tokenizer mytokenizer_v1000_n100000.pkl --vocab_size 1001 --model_dim 128 --num_heads 4 --num_layers 6
 ```
-multiple GPUs:
+multiple GPUs (replace G):
 ```
-torchrun --nproc_per_node=G train_gpt.py --model_name myGPT --tokenizer mytokenizer_v1000_n100000.pkl --vocab_size 1001 --model_dim 128 --num_heads 4 --num_layers 6
+torchrun --nproc_per_node=G train_gpt.py --model_name ReadmeGPT --tokenizer mytokenizer_v1000_n100000.pkl --vocab_size 1001 --model_dim 128 --num_heads 4 --num_layers 6
 ```
 - Note: vocabulary size must be equial to your tokenizer size PLUS any special tokens defined in this script (1 for '<|endoftext|>', so 1000 + 1 = 10001)
 - **WARNING:** if you set save_model=True that will create a .pt file, but by default the .gitignore will cause this to not be pushed with the rest of the repo, meaning you have to find a way to save it manually. This is done because the filesize is too large for github
@@ -79,13 +79,13 @@ torchrun --nproc_per_node=G train_gpt.py --model_name myGPT --tokenizer mytokeni
         - [x] figure out how to use streaming=True with multiple GPUs
     - [x] fix tensor shape bug that occurs on 4+ GPUs
     - [x] switch from world_size comparisons between GPUs to world_size^2 comparisons
-    - [ ] train a tokenizer so i can move on
+    - [x] train a tokenizer so i can move on
     - [ ] switch token ordering from (0, 1, 2, 3,...) to (0, 1, -1, 2, -2, 3,...) in order to take full advantage of int16 and cut memory utilization in half for GPT2 sized vocabulary of 50256
     - [ ] make custom triton kernels to speed up & improve vram utilization
     - [ ] make default dataset size auto-estimate GPU vram that'll be taken up & set to fill it up
 - [x] switch experiment output from single text file to folder with csv file of loss, model weights, etc
 - [x] add option to manipulate train_gpt.py hyperparameters through input args
-- [ ] implement optional gradient accumulation
+- [x] implement optional gradient accumulation
 - [ ] **implement [[DAGSeq2DAGSeq]] to test & learn more about how this repo should work**
 - [ ] excessively comment all the Modded-NanoGPT specific architecture edits to explain what's happening
     - [ ] ensure consistency in style across documents (eg. choose between (B,N,D) and (batch_size, seq_len, model_dim))

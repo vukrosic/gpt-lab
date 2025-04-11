@@ -13,8 +13,8 @@ import tiktoken
 import json
 import datetime
 import pickle
-import shutil # Added import for file copying
-import csv # Added import for CSV writing
+import shutil
+import csv
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch
@@ -22,9 +22,7 @@ torch.empty(1, device="cuda", requires_grad=True).backward() # prevents a bug on
 from torch import Tensor, nn
 import torch.nn.functional as F
 import torch.distributed as dist
-# use of FlexAttention contributed by @KoszarskyB
 from torch.nn.attention.flex_attention import BlockMask, flex_attention, create_block_mask
-#torch._inductor.config.coordinate_descent_tuning = True # we have banned this flag for new records because it causes compilation to take 30min
 
 # -----------------------------------------------------------------------------
 # Custom operators: FP8 matmul by @YouJiacheng
@@ -502,7 +500,7 @@ def distributed_data_generator(filename_pattern: str, batch_size: int, rank: int
         tokens_per_file.append(file_tokens)
     
     # Calculate how many tokens we need for training
-    tokens_needed = args.num_iterations * batch_size
+    tokens_needed = args.train_steps * batch_size
     
     # Determine if we need to cycle and calculate epochs
     will_cycle = total_tokens < tokens_needed
@@ -510,7 +508,7 @@ def distributed_data_generator(filename_pattern: str, batch_size: int, rank: int
     
     if rank == 0 and print_stats:
         print0(f"Total tokens across {len(files)} shard(s): {total_tokens:,}", console=True)
-        print0(f"Tokens needed for {args.num_iterations} iterations: {tokens_needed:,}", console=True)
+        print0(f"Tokens needed for {args.train_steps} iterations: {tokens_needed:,}", console=True)
         print0(f"Training will use approximately {epochs:.2f} epochs over the data", console=True)
     
     file_iter = itertools.cycle(files) if will_cycle else iter(files)
@@ -538,7 +536,8 @@ class Hyperparameters:
     train_seq_len = 8*1024 # FlexAttention sequence length - reduced from 48*1024 for GPUs w/ at least 8GB VRAM during testing
     val_seq_len = 12*1024 # FlexAttention sequence length for validation - reduced from 4*64*1024
     # optimization
-    num_iterations = 20#_000 # number of iterations to run
+    train_steps = 20#_000 # number of training steps to run
+    grad_acc_steps = 1 # number of gradient accumulation steps per training step
     cooldown_frac = 0.4 # fraction of training spent cooling down the learning rate
     # architecture
     tokenizer = "gpt4regex_v50256_n134217728.pkl" # any .pkl file in tokenizers/
@@ -565,6 +564,7 @@ class Hyperparameters:
         assert self.val_seq_len % 128 == 0, f"val_seq_len must be multiple of 128, got {self.val_seq_len}"
         assert self.num_layers >= 2, f"num_layers must be greater than or equal to 2 because of attention mask structure, got {self.num_layers}"
         assert self.num_layers >= 6, f"num_layers must be greater than or equal to 2 because of value embeddings structure, got {self.num_layers}"
+        assert self.grad_acc_steps >= 1, f"grad_acc steps must be int >= 1"
 
     @classmethod
     def from_args(cls):
@@ -579,7 +579,8 @@ class Hyperparameters:
         parser.add_argument('--val_seq_len', type=int, help='Validation sequence length')
         
         # Optimization arguments
-        parser.add_argument('--num_iterations', type=int, help='Number of training iterations')
+        parser.add_argument('--train_steps', type=int, help='Number of training iterations')
+        parser.add_argument('--grad_acc_steps', type=int, help='Number of gradient accumulation steps per training iteration')
         parser.add_argument('--cooldown_frac', type=float, help='Fraction of training for learning rate cooldown')
         
         # Architecture arguments
@@ -784,7 +785,7 @@ for opt in optimizers:
 
 # learning rate schedule: stable then decay
 def get_lr(step: int):
-    x = step / args.num_iterations # progress in training
+    x = step / args.train_steps # progress in training
     assert 0 <= x < 1
     if x < 1 - args.cooldown_frac:
         return 1.0
@@ -815,8 +816,13 @@ warmup_steps = 10
 initial_state = dict(model=copy.deepcopy(model.state_dict()),
                      optimizers=[copy.deepcopy(opt.state_dict()) for opt in optimizers]) # save the initial state
 for _ in range(warmup_steps):
-    inputs = targets = torch.randint(0, args.vocab_size, size=(args.train_seq_len,), device="cuda", dtype=torch.int64)
-    loss = model(inputs.to(torch.int32), targets)
+    loss = torch.tensor([0.], device="cuda")
+    for _ in range(args.grad_acc_steps):
+        inputs = targets = torch.randint(0, args.vocab_size, size=(args.train_seq_len,), device="cuda", dtype=torch.int64)
+        #torch.compiler.cudagraph_mark_step_begin()
+            # TODO why does un-cpmmenting this^ line throw an error here in the warmup but not down in training?
+        step_loss = model(inputs.to(torch.int32), targets)
+        loss += step_loss / args.grad_acc_steps
     loss.backward()
     if world_size > 1:
         for param in model.parameters():
@@ -827,7 +833,7 @@ for _ in range(warmup_steps):
 model.load_state_dict(initial_state["model"])
 for opt, opt_state in zip(optimizers, initial_state["optimizers"]):
     opt.load_state_dict(opt_state)
-del initial_state # TODO optionally save initial state of model
+del initial_state # TODO optionally save initial state of model jic someone wants to test different seeds
 
 if hasattr(torch.cuda, 'memory_stats'):
     print0(f"After warmup GPU memory: {torch.cuda.memory_allocated() // (1024 * 1024)} MB")
@@ -838,32 +844,6 @@ print0("kernels are toasty", console=True)
 #        Training and validation       #
 ########################################
 
-def sample_from_model(model, prompt, max_new_tokens=100, temperature=0.8, top_k=200):
-    """Generate text samples from the model given a prompt."""
-    tokenizer_config = pickle.load(open(f"tokenizers/{args.tokenizer}", 'rb'))
-    enc = tiktoken.Encoding(
-        name=args.tokenizer[:-4], # :-4 to remove the .pkl
-        pat_str=tokenizer_config['pat_str'],
-        mergeable_ranks=tokenizer_config['mergeable_ranks'],
-        special_tokens={
-            "<|endoftext|>": len(tokenizer_config['mergeable_ranks']),
-        }
-    )
-    encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
-    decode = lambda l: enc.decode(l)
-    
-    # Encode the prompt
-    input_ids = encode(prompt)
-    x = torch.tensor(input_ids, dtype=torch.int32, device="cuda")
-
-    # Generate
-    model.eval()
-    with torch.no_grad():
-        y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
-    
-    # Decode and return
-    return decode(y.tolist())
-
 train_loader = distributed_data_generator(args.train_files, world_size * args.train_seq_len, rank, world_size)
 
 training_time_ms = 0
@@ -871,9 +851,8 @@ training_time_ms = 0
 torch.cuda.synchronize()
 t0 = time.perf_counter()
 # begin training
-train_steps = args.num_iterations
-for step in range(train_steps + 1):
-    last_step = (step == train_steps)
+for step in range(args.train_steps + 1):
+    last_step = (step == args.train_steps)
 
     # --------------- VALIDATION SECTION -----------------
     if last_step or (args.val_loss_every > 0 and step % args.val_loss_every == 0):
@@ -885,14 +864,12 @@ for step in range(train_steps + 1):
         
         model.eval()
         
-        val_batch_size = world_size * args.val_seq_len
         # Ensure we validate on enough tokens while keeping memory usage reasonable
+        val_batch_size = world_size * args.val_seq_len
         val_steps = max(1, min(16, args.val_tokens // val_batch_size))
         val_tokens_used = val_batch_size * val_steps
-        
         print0(f"Validating on {val_tokens_used} tokens ({val_steps} steps with {val_batch_size} batch size)", console=True)
         
-        # Choose between real data loader and synthetic data loader for validation
         val_loader = distributed_data_generator(args.val_files, val_batch_size, rank, world_size, print_stats=False)
         val_loss = 0
         with torch.no_grad():
@@ -910,42 +887,49 @@ for step in range(train_steps + 1):
         
         # Calculate average time per step up to this point
         step_avg_ms = training_time_ms / max(step, 1) 
-        
-        print0(f"step:{step}/{train_steps} val_loss:{val_loss:.4f} train_time:{training_time_ms:.0f}ms step_avg:{step_avg_ms:.2f}ms", console=True)
+        print0(f"step:{step}/{args.train_steps} val_loss:{val_loss:.4f} "
+                f"train_time:{training_time_ms:.0f}ms step_avg:{step_avg_ms:.2f}ms", console=True)
         
         # Log validation metrics to CSV
         if master_process and metrics_csv_path:
             with open(metrics_csv_path, 'a', newline='') as csvfile:
                 writer = csv.writer(csvfile)
                 # Use .item() to get float from tensor for val_loss
-                writer.writerow([step, "val", f"{val_loss.item():.4f}", f"{training_time_ms:.0f}", f"{step_avg_ms:.2f}"])
+                writer.writerow([step, 
+                    "val", f"{val_loss.item():.4f}", 
+                    f"{training_time_ms:.0f}", 
+                    f"{step_avg_ms:.2f}"])
+
+        if last_step: # inside validation section to avoid the if check every training iteration
+            # 5. Save model checkpoint inside the experiment directory
+            if master_process and args.save_model and experiment_dir_path:
+                log = dict(step=step, model=model.state_dict(), optimizers=[opt.state_dict() for opt in optimizers])
+                # Ensure experiment_dir_path exists (though it should from earlier)
+                os.makedirs(experiment_dir_path, exist_ok=True)
+                save_path = experiment_dir_path / f"state_step{step:06d}.pt"
+                torch.save(log, str(save_path))
+                print0(f"Saved checkpoint to {save_path}", console=True)
+            # the last step only has the validation loop, so break to avoid training
+            break
         
         model.train()
         # start the clock again for the next training segment
         torch.cuda.synchronize()
         t0 = time.perf_counter()
 
-    if last_step:
-        # 5. Save model checkpoint inside the experiment directory
-        if master_process and args.save_model and experiment_dir_path:
-            log = dict(step=step, model=model.state_dict(), optimizers=[opt.state_dict() for opt in optimizers])
-            # Ensure experiment_dir_path exists (though it should from earlier)
-            os.makedirs(experiment_dir_path, exist_ok=True)
-            save_path = experiment_dir_path / f"state_step{step:06d}.pt"
-            torch.save(log, str(save_path))
-            print0(f"Saved checkpoint to {save_path}", console=True)
-        # the last step only has the validation loop, so break to avoid training
-        break
-
     # --------------- TRAINING SECTION -----------------
-    inputs, targets = next(train_loader)
-    
-    # Check if inputs exceed sequence length - can happen if the dataset has different sized examples
-    if inputs.size(0) > args.train_seq_len:
-        inputs = inputs[:args.train_seq_len]
-        targets = targets[:args.train_seq_len]
+    loss = torch.tensor([0.], device="cuda")
+    for _ in range(args.grad_acc_steps):
+        inputs, targets = next(train_loader)
+        # Check if inputs exceed sequence length - can happen if the dataset has different sized examples
+        if inputs.size(0) > args.train_seq_len:
+            inputs = inputs[:args.train_seq_len]
+            targets = targets[:args.train_seq_len]
+        torch.compiler.cudagraph_mark_step_begin()
+        step_loss = model(inputs, targets)
+        loss += step_loss / args.grad_acc_steps
+    loss.backward()
         
-    model(inputs, targets).backward()
     if world_size > 1:
         for param in model.parameters():
             dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
@@ -962,7 +946,7 @@ for step in range(train_steps + 1):
     # null the gradients
     model.zero_grad(set_to_none=True)
         
-    # logging - calculate *approximate* cumulative time and step average for logging during training
+    # calculate *approximate* cumulative time and step average for logging during training
     # Note: This is approximate because it includes the time for the current step's forward/backward pass
     # The more precise time is recorded just before validation
     if master_process:
@@ -972,7 +956,9 @@ for step in range(train_steps + 1):
         # Calculate the *true* approximate cumulative time
         approx_cumulative_time_ms = training_time_ms + current_segment_duration_ms
         approx_step_avg_ms = approx_cumulative_time_ms / (step + 1)
-        print0(f"step:{step+1}/{train_steps} train_time:{approx_cumulative_time_ms:.0f}ms step_avg:{approx_step_avg_ms:.2f}ms", console=True)
+        print0(f"step:{step+1}/{args.train_steps} "
+                f"train_time:{approx_cumulative_time_ms:.0f}ms "
+                f"step_avg:{approx_step_avg_ms:.2f}ms", console=True)
         
         # Log training step timing to CSV
         if metrics_csv_path:
@@ -1168,8 +1154,10 @@ def evaluate_hellaswag(model, data_path, limit=1014):
         ci_norm = wilson_conf_interval(num_correct_norm, num_total)
         
         print0(f"HellaSwag evaluation complete - {num_total} examples", console=True)
-        print0(f"Accuracy: {num_correct}/{num_total}={accuracy:.4f} [95% CI: {ci[0]:.3f}-{ci[1]:.3f}]", console=True)
-        print0(f"Normalized accuracy: {num_correct_norm}/{num_total}={accuracy_norm:.4f} [95% CI: {ci_norm[0]:.3f}-{ci_norm[1]:.3f}]", console=True)
+        print0(f"Accuracy: {num_correct}/{num_total}={accuracy:.4f} "
+                f"[95% CI: {ci[0]:.3f}-{ci[1]:.3f}]", console=True)
+        print0(f"Normalized accuracy: {num_correct_norm}/{num_total}={accuracy_norm:.4f} "
+                f"[95% CI: {ci_norm[0]:.3f}-{ci_norm[1]:.3f}]", console=True)
 
 # After training and sample generations, evaluate on HellaSwag
 hellaswag_path = "./data/hellaswag_val.jsonl" 
@@ -1186,6 +1174,32 @@ if world_size > 1:
 ########################################
 #        FINAL OUTPUT EXAMPLES         #
 ########################################
+
+def sample_from_model(model, prompt, max_new_tokens=100, temperature=0.8, top_k=200):
+    """Generate text samples from the model given a prompt."""
+    tokenizer_config = pickle.load(open(f"tokenizers/{args.tokenizer}", 'rb'))
+    enc = tiktoken.Encoding(
+        name=args.tokenizer[:-4], # :-4 to remove the .pkl
+        pat_str=tokenizer_config['pat_str'],
+        mergeable_ranks=tokenizer_config['mergeable_ranks'],
+        special_tokens={
+            "<|endoftext|>": len(tokenizer_config['mergeable_ranks']),
+        }
+    )
+    encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
+    decode = lambda l: enc.decode(l)
+    
+    # Encode the prompt
+    input_ids = encode(prompt)
+    x = torch.tensor(input_ids, dtype=torch.int32, device="cuda")
+
+    # Generate
+    model.eval()
+    with torch.no_grad():
+        y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
+    
+    # Decode and return
+    return decode(y.tolist())
 
 # Then at the end of training:
 # by allowing them both to do it but only printing from master we avoid messing with dist.barrier() in mask creation
