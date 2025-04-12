@@ -3,6 +3,9 @@ this repo is a massive overhaul of [Modded-NanoGPT](https://github.com/KellerJor
 
 **this repo is currently in beta, meaning that I think it's pretty workable but have not utilized it on enough of my own projects to guarantee that. before taking it out of beta I will 1) implement the further improvements already defined in the todo section below and 2) go and implement a few ideas and use what I learn to improve this codebase**
 
+check out the video about it:
+[![ERROR DISPLAYING IMAGE, CLICK HERE FOR VIDEO](https://img.youtube.com/vi/4cvBgHMDISs/0.jpg)](https://www.youtube.com/watch?v=4cvBgHMDISs)
+
 ## features
 - an architecture that trains *very fast*
 - an optimizer that uses *very little* memory
