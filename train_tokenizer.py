@@ -169,6 +169,37 @@ def slow_merge(words, most_common_pair, token_bytes):
     return new_words
 
 
+def nat2int(num):
+    """
+    converts natural numbers to integer counterparts for use in
+    efficiently utilizing signed int datatypes
+    (0, 1, 2, 3,...) -> (0, 1, -1, 2, -2,...)
+    """
+    if num == 0:
+        return 0
+    elif num % 2 == 1:  # odd numbers map to positive
+        return (num + 1) // 2
+    else:  # even numbers (except 0) map to negative
+        return -(num // 2)
+
+def int2nat(num):
+    """
+    converts integer numbers to natural counterparts for use in
+    efficiently utilizing signed int datatypes
+    (0, 1, -1, 2, -2,...) -> (0, 1, 2, 3,...)
+    """
+    if num == 0:
+        return 0
+    elif num > 0:  # positive numbers map back to odd
+        return 2 * num - 1
+    else:  # negative numbers map back to even
+        return -2 * num
+
+def convert_lofl(lists, f):
+    """applies a function to entries in a list of lists"""
+    return [[f(num) for num in sublist] for sublist in lists]
+
+
 def bpe_train(
     data: str, vocab_size: int, pat_str: str, demo: bool = False
 ) -> dict[bytes, int]:
@@ -178,7 +209,13 @@ def bpe_train(
     ranks = {}
     for i in range(2**8):
         ranks[bytes([i])] = i
-    int_type = torch.int16 if vocab_size <= 2**15 else torch.int32
+    
+    # choose efficient data type
+    int_type = torch.int16 if vocab_size <= (2**16)-2 else torch.int32
+    assert vocab_size <= (2**31)-2, f"bro why you making such a big tokenizer? {vocab_size}"
+    # set indicator tokens for merging ops
+    SEPARATOR_TOKEN = -32_768 if int_type == torch.int16 else -2_147_483_648
+    REMOVE_TOKEN = 32_767 if int_type == torch.int16 else 2_147_483_647
 
     # Splinter up our data into lists of bytes
     words: list[list[bytes]] = [
@@ -186,10 +223,12 @@ def bpe_train(
     ]
     # Create a list to store numeric token IDs for tensor operations
     # Initially, these are just byte values (0-255)
-    ids_lofl = [[ranks[b] for b in word] for word in words]
+    byte_ids_lofl = [[ranks[b] for b in word] for word in words]
+    # convert from (0,1,2,3...,255) to (0,1,-1,2,-2,...,127,-127,128) to saturate int16
+    ids_lofl = convert_lofl(byte_ids_lofl, nat2int)
     # turn data into parseable tensor - using the token IDs instead of raw bytes
     ids = torch.tensor(
-        list(chain.from_iterable(word + [-1] for word in ids_lofl))[:-1], 
+        list(chain.from_iterable(word + [SEPARATOR_TOKEN] for word in ids_lofl))[:-1], 
         dtype=int_type, device=device)
         # shape (words_in_data * (avg_word_len + 1))\
     
@@ -211,8 +250,8 @@ def bpe_train(
         unique, counts = torch.unique(pairs, return_counts=True, dim=1)
             # shapes (2, words_in_data * (avg_word_len + 1)) and (words_in_data * (avg_word_len + 1))
         
-        # use -1 separator between words to ensure we follow regex
-        valid_mask = torch.all(unique != -1, dim=0) # (very_long) where very_long < words_in_data * (avg_word_len + 1)
+        # use separator token between words to ensure we follow regex
+        valid_mask = torch.all(unique != SEPARATOR_TOKEN, dim=0) # (very_long) where very_long < words_in_data * (avg_word_len + 1)
         unique = unique[:, valid_mask] # (2, very_long)
         counts = counts[valid_mask] # (very_long)
 
@@ -261,10 +300,12 @@ def bpe_train(
         # Map token IDs back to the corresponding byte sequences
         # Using the dictionary in reverse to get the bytes corresponding to these IDs
         best_bytes = [None, None]
+        best_pair_0 = int2nat(best_pair[0])
+        best_pair_1 = int2nat(best_pair[1])
         for bytes_token, id_token in ranks.items():
-            if id_token == best_pair[0]:
+            if id_token == best_pair_0:
                 best_bytes[0] = bytes_token
-            if id_token == best_pair[1]:
+            if id_token == best_pair_1:
                 best_bytes[1] = bytes_token
         token_bytes = best_bytes[0] + best_bytes[1]
         new_token_id = len(ranks)
@@ -273,9 +314,9 @@ def bpe_train(
 
         # Now merge that most common pair in all the words
         pair_mask = (pairs[0] == best_pair[0]) & (pairs[1] == best_pair[1]) 
-        ids[:-1][pair_mask] = new_token_id
-        ids[1:][pair_mask] = -2
-        keep_mask = (ids != -2)
+        ids[:-1][pair_mask] = nat2int(new_token_id)
+        ids[1:][pair_mask] = REMOVE_TOKEN
+        keep_mask = (ids != REMOVE_TOKEN)
         ids = ids[keep_mask]
 
         if master_process:
@@ -292,6 +333,9 @@ def bpe_train(
                     # Flatten the demo words into a single list of tokens for visualization
                     demo_tokens = [token for word in demo_words for token in word]
                     visualise_tokens(demo_tokens)
+    
+    print(f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB "
+            f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB")
 
     return ranks
 

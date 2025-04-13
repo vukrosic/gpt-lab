@@ -83,7 +83,9 @@ torchrun --nproc_per_node=G train_gpt.py --model_name ReadmeGPT --tokenizer read
     - [x] fix tensor shape bug that occurs on 4+ GPUs
     - [x] switch from world_size comparisons between GPUs to world_size^2 comparisons
     - [x] train a tokenizer so i can move on
-    - [ ] switch token ordering from (0, 1, 2, 3,...) to (0, 1, -1, 2, -2, 3,...) in order to take full advantage of int16 and cut memory utilization in half for GPT2 sized vocabulary of 50256
+    - [x] switch token ordering from (0, 1, 2, 3,...) to (0, 1, -1, 2, -2, 3,...) in order to take full advantage of int16 and cut memory utilization in half for GPT2 sized vocabulary of 50256
+        - [x] add logging of max vram utilization
+    - [ ] switch from decreasing sizes of tensors over each iteration to maintaining size so that we can use torch.compile
     - [ ] triton kernels to speed up & improve vram utilization
     - [ ] make default dataset size auto-estimate GPU vram that'll be taken up & set to fill it up
 - [x] switch experiment output from single text file to folder with csv file of loss, model weights, etc
