@@ -248,10 +248,11 @@ def bpe_train(
         # find frequency of all pairs
         pairs = torch.stack((ids[:-1], ids[1:]), dim=0) # (2, words_in_data * (avg_word_len + 1))
         unique, counts = torch.unique(pairs, return_counts=True, dim=1)
-            # shapes (2, words_in_data * (avg_word_len + 1)) and (words_in_data * (avg_word_len + 1))
+            # shapes (2, very_long) and (very_long)
+            # where very_long < words_in_data * (avg_word_len + 1)
         
         # use separator token between words to ensure we follow regex
-        valid_mask = torch.all(unique != SEPARATOR_TOKEN, dim=0) # (very_long) where very_long < words_in_data * (avg_word_len + 1)
+        valid_mask = torch.all(unique != SEPARATOR_TOKEN, dim=0) # (very_long)
         unique = unique[:, valid_mask] # (2, very_long)
         counts = counts[valid_mask] # (very_long)
 
