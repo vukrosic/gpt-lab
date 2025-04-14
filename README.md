@@ -84,6 +84,9 @@ torchrun --nproc_per_node=G train_gpt.py --model_name ReadmeGPT --tokenizer read
     - [x] train a tokenizer so i can move on
     - [x] switch token ordering from (0, 1, 2, 3,...) to (0, 1, -1, 2, -2, 3,...) in order to take full advantage of int16 and cut memory utilization in half for GPT2 sized vocabulary of 50256
         - [x] add logging of max vram utilization
+    - [x] make safe against too-small dataset sizes
+    - [x] have dataset caching check for files with larger cached sizes and using those instead of exact matches
+    - [x] switch inter-gpu communication from function of world size to heuristic constant
     - [ ] triton kernels to speed up & improve vram utilization? not sure that's worth the effort
     - [ ] make default dataset size auto-estimate GPU vram that'll be taken up & set to fill it up
 - [x] switch experiment output from single text file to folder with csv file of loss, model weights, etc

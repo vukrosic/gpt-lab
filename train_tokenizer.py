@@ -107,9 +107,9 @@ class SimpleBytePairEncoding:
         return [self._decoder[token] for token in tokens]
 
     @staticmethod
-    def train(training_data: str, vocab_size: int, pat_str: str, demo: bool = False):
+    def train(training_data: str, vocab_size: int, pat_str: str, demo: bool = False, k: int = 256):
         """Train a BPE tokeniser on some data!"""
-        mergeable_ranks = bpe_train(data=training_data, vocab_size=vocab_size, pat_str=pat_str, demo=demo)
+        mergeable_ranks = bpe_train(data=training_data, vocab_size=vocab_size, pat_str=pat_str, demo=demo, k=k)
         return SimpleBytePairEncoding(pat_str=pat_str, mergeable_ranks=mergeable_ranks)
 
     @staticmethod
@@ -201,7 +201,7 @@ def convert_lofl(lists, f):
 
 
 def bpe_train(
-    data: str, vocab_size: int, pat_str: str, demo: bool = False
+    data: str, vocab_size: int, pat_str: str, demo: bool = False, k: int = 256
 ) -> dict[bytes, int]:
     # First, add tokens for each individual byte value
     if vocab_size < 2**8:
@@ -238,9 +238,6 @@ def bpe_train(
                     f"It should handle punctuation, numbers (like 42 and 3.14159), and special characters ($#@!) properly.\n"
                     f"Supercalifragilisticexpialidocious antidisestablishmentarianism!!!")
         demo_words = [[bytes([b]) for b in word.encode("utf-8")] for word in regex.findall(pat_str, demo_text)]
-
-    # the number of most common pairs on this GPU to be put up into consideration across all GPUs
-    k = world_size ** 3
 
     # Now, use our data to figure out which merges we should make
     progress_bar = tqdm(total=vocab_size - 256, unit="merges")
@@ -367,60 +364,98 @@ def fetch_fineweb_data(max_chars: int = 2**22):
     data_dir = os.path.join(os.path.dirname(__file__), "data")
     os.makedirs(data_dir, exist_ok=True)
     
-    # Include max_chars in the filename for size-specific caching
-    local_data_path = os.path.join(data_dir, f"tokenizer_training_data_{max_chars}.txt")
+    # Check for existing files that meet the size requirement
+    def find_best_file():
+        existing_files = []
+        for file in os.listdir(data_dir):
+            if file.startswith("tokenizer_training_data_") and file.endswith(".txt"):
+                try:
+                    file_size = int(file.split("_")[-1].split(".")[0])
+                    existing_files.append((file, file_size))
+                except ValueError:
+                    continue
+        
+        # Find suitable existing files (>= max_chars)
+        suitable_files = [(f, s) for f, s in existing_files if s >= max_chars]
+        
+        if suitable_files:
+            # Use the smallest file that meets our requirements
+            suitable_files.sort(key=lambda x: x[1])
+            return suitable_files[0]
+        return None, None
     
-    # Only the master process downloads the data
-    if rank == 0:
-        should_download = False
+    # First check if we have a suitable file already
+    best_file, best_size = find_best_file()
+    
+    # Only the master process handles downloading if needed
+    if rank == 0 and best_file is None:
+        # Clean up smaller files
+        for file in os.listdir(data_dir):
+            if file.startswith("tokenizer_training_data_") and file.endswith(".txt"):
+                try:
+                    file_size = int(file.split("_")[-1].split(".")[0])
+                    if file_size < max_chars:
+                        print(f"Removing smaller existing data file: {file} ({file_size:,} chars < {max_chars:,} chars)")
+                        os.remove(os.path.join(data_dir, file))
+                except ValueError:
+                    continue
         
-        if not os.path.exists(local_data_path):
-            should_download = True
-            print(f"No cached data found for size {max_chars}, downloading...")
+        # Download new data
+        new_file_name = f"tokenizer_training_data_{max_chars}.txt"
+        local_data_path = os.path.join(data_dir, new_file_name)
+        print(f"Downloading FineWeb data to {local_data_path}...")
         
-        if should_download:
-            print(f"Downloading FineWeb data to {local_data_path}...")
-            # Download data only once from the dataset
-            dataset = load_dataset("HuggingFaceFW/fineweb", 
-                                  name="sample-10BT", 
-                                  split="train", 
-                                  streaming=True)
-            
-            text_data = []
-            doc_lengths = []
-            tot_len = 0
-            for item in dataset:
-                tot_len += len(item["text"])
-                if tot_len >= max_chars:
-                    tot_len -= len(item["text"])
-                    break
-                text_data.append(item["text"])
-                doc_lengths.append(len(item["text"]))
-            
-            # Show statistics if requested
-            print(f"\nDataset Statistics:"
-                f"\nTotal documents: {len(text_data)}"
-                f"\nTotal characters: {sum(doc_lengths):,}"
-                f"\nAverage document length: {np.mean(doc_lengths):.1f} characters"
-                f"\nMedian document length: {np.median(doc_lengths):.1f} characters"
-                f"\nShortest document: {min(doc_lengths)} characters"
-                f"\nLongest document: {max(doc_lengths):,} characters"
-                f"\nStandard deviation: {np.std(doc_lengths):.1f} characters")
-            
-            # Save the combined text to a file
-            with open(local_data_path, 'w', encoding='utf-8') as f:
-                f.write("\n".join(text_data))
-            print(f"Data saved to {local_data_path}")
-        else:
-            print(f"Using existing data from {local_data_path}")
+        dataset = load_dataset("HuggingFaceFW/fineweb", 
+                              name="sample-10BT", 
+                              split="train", 
+                              streaming=True)
+        
+        text_data = []
+        doc_lengths = []
+        tot_len = 0
+        for item in dataset:
+            text_data.append(item["text"])
+            doc_lengths.append(len(item["text"]))
+            tot_len += len(item["text"])
+            if tot_len >= max_chars:
+                break
+        
+        # Show statistics
+        print(f"\nDataset Statistics:"
+            f"\nTotal documents: {len(text_data)}"
+            f"\nTotal characters: {sum(doc_lengths):,}"
+            f"\nAverage document length: {np.mean(doc_lengths):.1f} characters"
+            f"\nMedian document length: {np.median(doc_lengths):.1f} characters"
+            f"\nShortest document: {min(doc_lengths)} characters"
+            f"\nLongest document: {max(doc_lengths):,} characters"
+            f"\nStandard deviation: {np.std(doc_lengths):.1f} characters")
+        
+        # Save the combined text to a file
+        with open(local_data_path, 'w', encoding='utf-8') as f:
+            f.write("\n".join(text_data))
+        print(f"Data saved to {local_data_path}")
     
     # Make sure all processes wait until the data is downloaded
     if world_size > 1:
         dist.barrier()
     
-    # All processes read from the local file
+    # After potential download, all ranks check again for the best file
+    best_file, best_size = find_best_file()
+    assert best_file is not None, f"No suitable data file found for size {max_chars}"
+    
+    local_data_path = os.path.join(data_dir, best_file)
+    if rank == 0:
+        print(f"All ranks using data from {local_data_path} ({best_size:,} chars)")
+    
+    # All processes read from the local file and trim if needed
     with open(local_data_path, 'r', encoding='utf-8') as f:
         data = f.read()
+    
+    # Trim data if it's larger than needed
+    if len(data) > max_chars:
+        data = data[:max_chars]
+        if rank == 0:
+            print(f"Trimmed data to {max_chars:,} characters")
     
     # Shard the data for distributed processing if needed
     if world_size > 1:
@@ -435,7 +470,7 @@ def fetch_fineweb_data(max_chars: int = 2**22):
     return data
 
 
-def train_simple_encoding(sample_size: int, vocab_size: int, demo: bool = False):
+def train_simple_encoding(sample_size: int, vocab_size: int, demo: bool = False, k: int = 256):
     """
     Train a custom BPE tokenizer using FineWeb data.
     
@@ -453,7 +488,7 @@ def train_simple_encoding(sample_size: int, vocab_size: int, demo: bool = False)
     gpt4_pattern = (
         r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
     )
-    enc = SimpleBytePairEncoding.train(data, vocab_size=vocab_size, pat_str=gpt4_pattern, demo=demo)
+    enc = SimpleBytePairEncoding.train(data, vocab_size=vocab_size, pat_str=gpt4_pattern, demo=demo, k=k)
     
     # Test the tokenizer with a simple example
     test_str = f"hello world rank={rank}"
@@ -507,11 +542,40 @@ if __name__ == "__main__":
         help="Visualize tokenization during training")
     args = parser.parse_args()
 
+    # this is the number of top-k unique pairs set to be communicated between GPUs
+    k = 256 # set heuristically, shouldn't be very important
+    
+    # expected compression rate should scale logarithmically with vocab size
+    # this is an unrealistic upper limit on what the compression rate might be
+    if args.vocabsize == 256:  # Base vocabulary
+        comp_rate = 1.
+    elif args.vocabsize <= 1000:
+        comp_rate = 10.
+    elif args.vocabsize <= 10000:
+        comp_rate = 20.
+    elif args.vocabsize <= 100000:
+        comp_rate = 30.
+    else:
+        comp_rate = 40.
+    # Add safety check based on this estimate
+    min_required_samples = int((args.vocabsize - 256) * world_size * comp_rate)
+    if args.samples < min_required_samples:
+        if master_process:
+            print(f"Warning: Dataset size ({args.samples} chars) may be too small for "
+                    f"vocabulary size {args.vocabsize} with {world_size} GPUs")
+            print(f"Recommended minimum size to not hit an error: {min_required_samples} characters")
+            print(f"To be clear, that^ size is still orders of magnitude smaller than the amount you'd"
+                    f" need to train a good tokenizer")
+        if world_size > 1 and args.samples // world_size / comp_rate <= k:
+            raise ValueError(f"Dataset too small for inter-GPU communication with {world_size}"
+                            f" GPUs and vocab size {args.vocabsize}")
+
     # Train the tokenizer
     enc = train_simple_encoding(
         sample_size=args.samples,
         vocab_size=args.vocabsize,
-        demo=args.demo
+        demo=args.demo,
+        k=k
     )
     
     # Save the tokenizer
