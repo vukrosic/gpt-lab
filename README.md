@@ -1,126 +1,90 @@
-# GPT-Lab **(BETA)**
-this repo is a massive overhaul of [Modded-NanoGPT](https://github.com/KellerJordan/modded-nanogpt) with the goal of being a base for amateurs to do cheap & easy LLM experiments at any scale. 
+# GPT-Lab **(currently in ALPHA)**
+this repo is a massive overhaul of [Modded-NanoGPT](https://github.com/KellerJordan/modded-nanogpt) with the goal of being a base for amateurs to do cheap & easy LLM experiments at a large enough scale to be worthy of an arxiv preprint. the idea is that repos like Modded-NanoGPT, [NanoGPT](https://github.com/karpathy/nanoGPT), [TinyLlama](https://github.com/jzhang38/TinyLlama), and [Meta's Lingua](https://github.com/facebookresearch/lingua), are either too old of an architecture, too purpose-specific, not from-scratch enough, too expensive to run, too overly-complicated, not well setup for quickly iterating research ideas, etc and we plan to occupy a unique balance of those trade-offs
 
-**this repo is currently in beta, meaning that I think it's pretty workable but have not utilized it on enough of my own projects to guarantee that. before taking it out of beta I will 1) implement the further improvements already defined in the todo section below and 2) go and implement a few ideas and use what I learn to improve this codebase**
+**this repo is currently in alpha, meaning that I think it's somewhat workable but have not utilized it on enough of my own experiments to guarantee that. before taking it out of alpha I will:
+    1) implement the further improvements defined in the todo section below and 
+    2) go and implement a few experiment ideas and use what I learn from the difficulties I run into to add more things to the todo list**
 
-check out the video about it:
+check out the video I made about it:
+
 [![ERROR DISPLAYING IMAGE, CLICK HERE FOR VIDEO](https://img.youtube.com/vi/4cvBgHMDISs/0.jpg)](https://www.youtube.com/watch?v=4cvBgHMDISs)
 
-## features
-- an architecture that trains *very fast*
-- an optimizer that uses *very little* memory
-- a fully from-scratch BPE tokenizer implementation that's *very fast* and memory efficient
-- logging and code state saving for each experiment you run
-- benchmarking (hellaswag)
+## getting started
+the input arguments in these instructions are comically small values designed to get you up and running on the tiniest GPU(s) for demonstration purposes; in practice you'll have to tune them to properly utilize the available VRAM of your setup
 
-## instructions 
-The input arguments in these instructions are comically small values designed to work on the tiniest GPU for demonstration purposes to get you up and running; in practice you'll have to tune them to properly utilize the available VRAM of your setup. Also, in the below instructions, `G` is the number of GPUs you have
-
-1. `pip install -r requirements.txt`
-2. samples is the number of text characters to train on (shared evenly across all GPUs). vocabulary size should exclude any special tokens you plan on using
+1. either have one or more GPUs or hook up to a cloud GPU. for the latter see [this tutorial](https://youtu.be/mmRlZKFLAvE); i recommend [vast.ai](vast.ai) since they're always at or near the cheapest
+2. either fork or create a template of this repo
+3. `pip install -r requirements.txt`
+4. train your tokenizer on fineweb. samples is the number of text characters to train on (split up evenly across all GPUs). vocabulary size should exclude any special tokens you plan on using later. for a tutorial on how Byte-Pair Encoding (BPE) tokenizers work, see [andrej karpathy's video](https://www.youtube.com/watch?v=zduSFxRajkE&t=1430s) for a simple & slow CPU implementation
 
 single GPU:
 ```
 python train_tokenizer.py --samples 100000 --vocabsize 1000 --name readmetokenizer --demo
 ```
-multiple GPUs (replace G):
+multiple GPUs (replace `G` with the number of GPUs you have):
 ```
 torchrun --nproc_per_node=G train_tokenizer.py --samples 100000 --vocabsize 1000 --name readmetokenizer --demo
 ```
-3. dataset options are 10B, 100B, 10Bedu (default), or 100Bedu. tune the shard size (default 100mil) and number of shards to the number of shards to your desired training run length. the script will only create one validation shard which is not included in the count of num_shards
+5. download the [fineweb](https://huggingface.co/datasets/HuggingFaceFW/fineweb) dataset and convert all the raw text into tokens. dataset options are 10B, 100B, 10Bedu (default), or 100Bedu. tune shard_size (default 100 million) and num_shards to the quantity of data for your desired training run length. the script will only create one shard for the validation set which is not included in the count of num_shards
 ```
 python download_fineweb.py --version 10B --shard_size 10000000 --num_shards 1 --tokenizer readmetokenizer_v1000_n100000.pkl
 ```
-4. `python download_hellaswag.py`
-5. Open `train_gpt.py` and tune the hyperparameters to your liking, or override the defaults using input arguments. 
+6. download the hellaswag benchmark: `python download_hellaswag.py`
+7. train your language model. vocabulary size must be equial to your tokenizer size PLUS any special tokens defined in this script (1 for '<|endoftext|>', so 1000 + 1 = 10001). **WARNING:** if you include `--save_model` that will create a `.pt` file of the model weights, but by default the `.gitignore` will now allow this file to be pushed to github with the rest of the repo. this is done because the filesize is too large for github, and it means you have to find a way to download the model weights manually if you're on a cloud GPU and want to keep them
 
 single GPU:
 ```
 python train_gpt.py --model_name ReadmeGPT --tokenizer readmetokenizer_v1000_n100000.pkl --vocab_size 1001 --model_dim 128 --num_heads 4 --num_layers 6
 ```
-multiple GPUs (replace G):
+multiple GPUs (replace `G`):
 ```
 torchrun --nproc_per_node=G train_gpt.py --model_name ReadmeGPT --tokenizer readmetokenizer_v1000_n100000.pkl --vocab_size 1001 --model_dim 128 --num_heads 4 --num_layers 6
 ```
-- Note: vocabulary size must be equial to your tokenizer size PLUS any special tokens defined in this script (1 for '<|endoftext|>', so 1000 + 1 = 10001)
-- **WARNING:** if you set save_model=True that will create a .pt file, but by default the .gitignore will cause this to not be pushed with the rest of the repo, meaning you have to find a way to save it manually. This is done because the filesize is too large for github
-6. once all that is confirmed to be up & working, start editing the code and running your own experiments
+8. look in `experiments/` for your model. you should see 1) a `.txt` backup of all the `.py` files we just ran at the time of training (except `train_tokenizer.py`, which is backed inside the tokenizer `.pkl` file and therefore not readable from a file browser), 2) a `.csv` containing the training time & loss, 3) a log file containing important information such as the hellaswag benchmark score and the maximum memory allocated during training, and 4) maybe a `.pt` file if you elected to run with `--save_model`
+9. great, now that all that is confirmed to be up & working you can start editing the code and running your own experiments!
 
 ## todos / planned features:
-- [x] integrate generate()
-    - [x] make forward() work w/ both inference & training
-    - [x] make inference causal mask next multiple of 128
-    - [x] print example generations at end of training
-    - [x] write sample function
-- [x] see if i can cleanup/remove all the cache clearing
-- [x] lower dataset download size for testing
-- [x] integrate mlp_ratio & improve hyperparameter config
-- [x] confirm support for 2x 8GB vram GPUs
-- [x] switch dataset strings to support edu or non-edu fineweb without manually editing
-- [x] change multi-epoch warnign from single shard to dynamically know how many epochs are being run
-- [x] integrate hellaswag.py
-    - [x] print score at end of training
-    - [x] confidence intervals
-    - [x] cleanup
-    - [x] distribute hellaswag benchmark
-- [x] rename to NanoGPT-Lab
-- [x] fix issue getting stuck at warmup kernels
-- [x] look thru the long/short_bm to figure out if it actually makes sense to use a simple causal mask during inference (likely doesn't; prolly gonna have to switch back to the training masks)
-    - [x] test to make sure this worked; when i did it i was on some broken GPUs
-    - [x] switch back to normal doc-causal tokenizer to avoid headache
-- [x] test more than two GPUs to confirm I didn't break anything
-- [x] implement ability to run on a single GPU without a hacky debug config
-- [x] eliminate redundancy in dataset download scripts
-- [x] setup for custom tokenizer into `train_tokenizer.py` that roughly replicates GPT2 for now but will be easy to edit later
-    - [x] train
-    - [x] train on GPU
-    - [x] confirm cokmpatibility with `fineweb.py`
-    - [x] make `fineweb.py` able to do just one shard
-    - [x] confirm compatibility with `train_gpt.py
-    - [x] setup for multi-gpu training
-        - [x] figure out how to use streaming=True with multiple GPUs
-    - [x] fix tensor shape bug that occurs on 4+ GPUs
-    - [x] switch from world_size comparisons between GPUs to world_size^2 comparisons
-    - [x] train a tokenizer so i can move on
-    - [x] switch token ordering from (0, 1, 2, 3,...) to (0, 1, -1, 2, -2, 3,...) in order to take full advantage of int16 and cut memory utilization in half for GPT2 sized vocabulary of 50256
-        - [x] add logging of max vram utilization
-    - [x] make safe against too-small dataset sizes
-    - [x] have dataset caching check for files with larger cached sizes and using those instead of exact matches
-    - [x] switch inter-gpu communication from function of world size to heuristic constant
-    - [ ] triton kernels to speed up & improve vram utilization? not sure that's worth the effort
+- [ ] write a `contributing.md` to detail best practices for potential contributors
+- [ ] excessively comment and explain everything that's happening in each file
+    - [ ] ensure consistency in comment style (eg. choose between (B,N,D) and (batch_size, seq_len, model_dim))
+- [ ] **implement more of my ideas using the code as it stands as a baseline to test & learn more about how this repo should work**
+- `train_tokenizer.py`
     - [ ] make default dataset size auto-estimate GPU vram that'll be taken up & set to fill it up
-- [x] switch experiment output from single text file to folder with csv file of loss, model weights, etc
-- [x] add option to manipulate train_gpt.py hyperparameters through input args
-- [x] implement optional gradient accumulatio
-- [ ] confirm still works on 
-    - [ ] A100s
+    - [ ] merge [jeff's idea](https://github.com/evintunador/gpt-lab/pull/2) to speed up training
+- `train_gpt.py`
+    - [ ] confirm code still works datacenter GPUs
         - [x] single
         - [ ] DDP
-            - [ ] fix flex-attention bwd compile bug when using torch.compile
-    - [ ] H100s
-        - [x] single GPU
-            - [x] fp8 works
-        - [ ] DDP
-            - [ ] fix flex-attention bwd compile bug when using torch.compile
-- [ ] **implement [[DAGSeq2DAGSeq]] to test & learn more about how this repo should work**
-- [ ] excessively comment all the Modded-NanoGPT specific architecture edits to explain what's happening
-    - [ ] ensure consistency in style across documents (eg. choose between (B,N,D) and (batch_size, seq_len, model_dim))
-- [ ] architecture edits
-    - [ ] adjust value embeddings to dynamically account for different number of layers
-    - [ ] remove simple doc-causal attention mask and re-implement moddedGPT's original masks that alternate bw full causal & sliding window and increase window size over the course of training
-        - [ ] make full-sliding pattern dynamically account for different number of layers
-    - [ ] more advanced parallelization scheme so that we can do MoE??
-    - [ ] MLA or deepseek's new sparse attention?
-- [ ] make NanoGPT and Llama3 versions for those who want to work off of those as a base. They'd be less bang for your buck but good for people who want a more familiar baseline rather than all the weird tricks in moddedGPT
-    - [ ] continually update moddedGPT & the tokenizer to fit best methods & bring down costs while leaving nanoGPT and llama versions stagnant
-- [ ] train models on 1x8GB vram, 2x12 GB, 4x24GB, and 8x80GB and write down how much each one cost me in the README
-    - [ ] use chinchilla-optimal model size & data quantity
-- [ ] more benchmarks? api calls to a smarter LLM for mass comparisons?
+            - [ ] fix flex-attention backward compile bug when using torch.compile
+    - [ ] add in optional parameter initialization control through a seed
+    - *planned* architecture edits (if they speed up / improve performance)
+        - [ ] adjust value embeddings to dynamically account for any number of layers & therefore no longer require a minimum of 6
+        - [ ] change values originally over-optimized for GPT2-124m (such as the attention head scaling factor & output logits scaling) to be either a function of model size, learnable, or something else that makes more sense
+        - [ ] re-implement Modded-NanoGPT's original attention masks
+            - [ ] alternate between full-causal and sliding-window attention
+                - [ ] make full-sliding pattern dynamically account for different numbers of model layers
+            - [ ] increase window size as a function of training steps
+    - *potential* architecture edits (if they speed up / improve performance)
+        - [ ] go back and rapidly test a bunch of boring architecture edits (eg. MLP activation function) to see whether those chosen by Modded-NanoGPT were really just over-fitting their dataset
+        - [ ] MLA or deepseek's new sparse attention?
+- `download_fineweb.py`
+    - [ ] add options for shuffling & a seed
+    - [ ] add more fineweb samples (eg. 350BT, whole thing)
+- [ ] build `train_nanogpt.py` and `train_llama3.py` versions for those who want to work off of a more well known architecture as a base (this would be more expensive due to slower training times)
+    - [ ] continually update `train_gpt.py` & the tokenizer to fit best methods and bring down costs while leaving nanoGPT and llama versions stagnant
+- [ ] train models on 1x8GB vram, 2x16 GB, 4x32GB, and 8x80GB (for how much data each??) and record how much $ each one cost to run so that people have an estimate before doing their experiments
+    - [ ] use chinchilla-optimal model size & data quantity?
+- [ ] write some sort of best-practices guide for amateur experimenters to explain things like "when to keep compute vs parameters vs memory vs etc constant" and "how to properly structure an ablation"
+- [ ] more benchmarks
+    - [ ] api calls to a smarter LLM judge for mass comparisons of generated outputs?
     - [ ] add batched inference to speed up said benchmarks
-- [ ] write latex preprint skeleton
-    - [ ] moddedGPT architecture specifics in an appendix
-    - [ ] auto-generated loss curves & benchmark tables to go right into the preprint
-- [ ] post-training/RL?
+    - [ ] figure out what additional benchmarks make sense for model of this scale
+- [ ] write latex preprint skeleton for others to begin theirs from
+    - [ ] specifics of the Modded-NanoGPT architecture in an appendix
+    - [ ] auto-generated loss plots & benchmark tables to go right into the preprint
+- [ ] implement some sort of post-training/RL once the field settles on a technique?
+
+
 
 # Modded-NanoGPT (ORIGINAL README)
 
