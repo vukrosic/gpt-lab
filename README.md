@@ -61,7 +61,7 @@ torchrun --nproc_per_node=G train_gpt.py --model_name ReadmeGPT --tokenizer read
         - [x] single
         - [ ] DDP
             - [ ] fix flex-attention backward compile bug when using torch.compile
-    - [ ] add in optional parameter initialization control through a seed
+    - [x] add in optional parameter initialization control through a seed
     - *planned* architecture edits (if they speed up / improve performance)
         - [ ] adjust value embeddings to dynamically account for any number of layers & therefore no longer require a minimum of 6
         - [ ] change values originally over-optimized for GPT2-124m (such as the attention head scaling factor & output logits scaling) to be either a function of model size, learnable, or something else that makes more sense
