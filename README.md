@@ -1,9 +1,10 @@
 # GPT-Lab **(currently in ALPHA)**
 this repo is a massive overhaul of [Modded-NanoGPT](https://github.com/KellerJordan/modded-nanogpt) with the goal of being a base for amateurs to do cheap & easy LLM experiments at a large enough scale to be worthy of an arxiv preprint. the idea is that repos like Modded-NanoGPT, [NanoGPT](https://github.com/karpathy/nanoGPT), [TinyLlama](https://github.com/jzhang38/TinyLlama), and [Meta's Lingua](https://github.com/facebookresearch/lingua), are either too old of an architecture, too purpose-specific, not from-scratch enough, too expensive to run, too overly-complicated, not well setup for quickly iterating research ideas, etc and we plan to occupy a unique balance of those trade-offs
 
-**this repo is currently in alpha, meaning that I think it's somewhat workable but have not utilized it on enough of my own experiments to guarantee that. before taking it out of alpha I will:
+**this repo is currently in alpha, meaning that I think it's somewhat workable but have not utilized it on enough of my own experiments to guarantee that. before taking it out of alpha I will:**
+
     1) implement the further improvements defined in the todo section below and 
-    2) go and implement a few experiment ideas and use what I learn from the difficulties I run into to add more things to the todo list**
+    2) go and implement a few experiment ideas and use what I learn from the difficulties I run into to add more things to the todo list
 
 check out the video I made about it:
 
