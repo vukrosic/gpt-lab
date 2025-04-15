@@ -318,7 +318,7 @@ def bpe_train(
 
                 # See the intermediate merges play out!
                 if j % 1000 == 0 or j in [256, vocab_size - 1]:
-                    print(f"\nThe most common pair {best_pair[0]} + {best_pair[1]} "
+                    print(f"\nThe most common pair {int2nat(best_pair[0])} + {int2nat(best_pair[1])} "
                             f"which makes {token_bytes} our {len(ranks)}th token")
                     # Flatten the demo words into a single list of tokens for visualization
                     demo_tokens = [token for word in demo_words for token in word]
@@ -437,25 +437,24 @@ def fetch_fineweb_data(max_chars: int = 2**22):
     
     local_data_path = os.path.join(data_dir, best_file)
     if rank == 0:
-        print(f"All ranks using data from {local_data_path} ({best_size:,} chars)")
+        print(f"All ranks using data from first {max_chars} characters of {local_data_path}")
     
     # All processes read from the local file and trim if needed
     with open(local_data_path, 'r', encoding='utf-8') as f:
-        data = f.read()
+        data = f.read()[:max_chars]
     
     # Trim data if it's larger than needed
-    if len(data) > max_chars:
+    """if len(data) > max_chars:
         data = data[:max_chars]
         if rank == 0:
-            print(f"Trimmed data to {max_chars:,} characters")
+            print(f"Trimmed data to {max_chars:,} characters")"""
     
     # Shard the data for distributed processing if needed
     if world_size > 1:
         # Simple way to shard the data: split by character count
-        data_size = len(data)
-        shard_size = data_size // world_size
+        shard_size = max_chars // world_size
         start = rank * shard_size
-        end = start + shard_size if rank < world_size - 1 else data_size
+        end = start + shard_size if rank < world_size - 1 else max_chars
         data = data[start:end]
         print(f"Rank {rank}: Processing {len(data):,} characters ({start:,} to {end:,})")
     
