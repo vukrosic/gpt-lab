@@ -52,6 +52,7 @@ torchrun --nproc_per_node=G train_gpt.py --model_name ReadmeGPT --tokenizer read
 - `train_tokenizer.py`
     - [ ] make default dataset size auto-estimate GPU vram that'll be taken up & set to fill it up
     - [ ] merge [jeff's idea](https://github.com/evintunador/gpt-lab/pull/2) to speed up training
+    - [ ] switch the backup/logging to be more `train_gpt.py` style. keep the `.pkl` for actual use but save it in a folder alongside a `.txt` backup of `train_tokenizer.py` and another `.txt` file to list out & visualize all the merges
 - `train_gpt.py`
     - [ ] confirm code still works datacenter GPUs
         - [x] single
