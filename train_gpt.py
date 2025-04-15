@@ -16,7 +16,7 @@ import pickle
 import shutil
 import csv
 import random # Import random for potential future use, though not strictly needed for torch seeding
-import numpy as np # Import numpy for potential future use
+import numpy as np # Import numpy for potential future use, set random seed now not to forget to set it later
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch
