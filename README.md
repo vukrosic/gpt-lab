@@ -46,48 +46,74 @@ torchrun --nproc_per_node=G train_gpt.py --model_name ReadmeGPT --tokenizer read
 
 ## todos / planned features:
 - meta
-    - [ ] write a `contributing.md` to detail best practices for potential contributors
-    - [ ] build testing script
-    - [ ] switch to legit versions & stop working on main branch
+    - [ ] write a `contributing.md` to detail best practices for potential non-model code contributors
+    - [ ] write a `how_to_experiment.md` to detail best practices for people looking to conduct scientifically robust experiments. explain things like:
+        - [ ] how to calculate the compute, parameter, memory, etc differences of a given edit
+        - [ ] when to hold compute vs parameters vs memory vs etc constant and when to let one vary
+        - [ ] how to properly structure an ablation
+        - [ ] etc.
+    - [ ] write a 'contributing_experiments.md' to detail best practices for people looking to get their experiment incorporated as an improvement to the baseline
+        - [ ] have a part of this readme link to all finished experiments above a certain quality, whether they got incorporated or not
+    - [ ] build some kind of (semi-)automated testing framework to check each PR for bugs
+    - [ ] switch to legit versionioning rather than sloppily working on main branch
 - [ ] excessively comment and explain everything that's happening in each file
+    - [ ] tensor shapes for every operation
     - [ ] ensure consistency in comment style (eg. choose between (B,N,D) and (batch_size, seq_len, model_dim))
 - [ ] **implement more of my ideas using the code as it stands as a baseline to test & learn more about how this repo should work**
 - `train_tokenizer.py`
     - [ ] make default dataset size auto-estimate GPU vram that'll be taken up & set to fill it up
-    - [ ] merge [jeff's idea](https://github.com/evintunador/gpt-lab/pull/2) to speed up training
-    - [ ] switch the backup/logging to be more `train_gpt.py` style. keep the `.pkl` for actual use but save it in a folder alongside a `.txt` backup of `train_tokenizer.py` and another `.txt` file to list out & visualize all the merges
+    - [ ] change dataloader to load small chunks of dataset at a time from SSD to CPU-RAM to VRAM; just now I trained `tokenizers/gpt4regex_v50256_n1000000000.pkl` on 8x4070Ti's but only filled up 6-7GB of their available 16GB since for a dataset any larger the CPU would run out of memory before I could even get data onto the GPU
+    - [ ] switch the backup/logging to be more `train_gpt.py` style. keep the `.pkl` for actual use (storage of regex pattern & merges) but save it in a folder alongside a `.txt` backup of `train_tokenizer.py` and another `.txt` file to list out & visualize all the merges
+        - [ ] make corresponding changes inside `train_gpt.py`
 - `train_gpt.py`
     - [ ] confirm code still works datacenter GPUs
         - [x] single
         - [ ] DDP
-            - [ ] fix flex-attention backward compile bug when using torch.compile
-    - [x] add in optional parameter initialization control through a seed
-    - *planned* architecture edits (if they speed up / improve performance)
-        - [ ] adjust value embeddings to dynamically account for any number of layers & therefore no longer require a minimum of 6
+            - [ ] fix flex-attention backward torch.compile bug
+    - [x] add in optional parameter initialization control through a seed into hyperparameters
+    - **planned** architecture edits (*if* they speed up / improve performance)
+        - [ ] adjust value embeddings to dynamically account for any number of layers & therefore no longer require a minimum of 6. currently the 3 value embeddings get added to the first 3 and last 3 layers no matter how many layers you have, but we need some way to determine how many value embeddings to initialize and what layers to put them on as a function of how many layers there are. for a rough example, 1-2 layers probably no value embeddings, 3-6 let's make one and put them on first & final layer, 7-11 make 2 VEs and put them on first two & final two layers, 12-23 do three VEs, 24-47 do four VEs, etc
         - [ ] change values originally over-optimized for GPT2-124m (such as the attention head scaling factor & output logits scaling) to be either a function of model size, learnable, or something else that makes more sense
-        - [ ] re-implement Modded-NanoGPT's original attention masks
+        - [ ] re-implement Modded-NanoGPT's original attention masks (see [`def create_blockmasks()`](https://github.com/KellerJordan/modded-nanogpt/blob/master/train_gpt.py)
             - [ ] alternate between full-causal and sliding-window attention
-                - [ ] make full-sliding pattern dynamically account for different numbers of model layers
-            - [ ] increase window size as a function of training steps
-    - *potential* architecture edits (if they speed up / improve performance)
-        - [ ] go back and rapidly test a bunch of boring architecture edits (eg. MLP activation function) to see whether those chosen by Modded-NanoGPT were really just over-fitting their dataset
+                - [ ] make full-sliding pattern dynamically account for different numbers of model layers (similar to description of value embeddings above)
+            - [ ] gradually increase window size as a function of training steps
+        - [ ] user Liger kernel's fused CE Loss (or are we only using pytorch for this file and splitting off a separate version that's allowed to use custom kernels? idk) which would require either making our own custom version or getting rid of the scaling in-between the logits & the CE Loss
+        - [ ] implement [mu-parameterization](https://github.com/EleutherAI/nanoGPT-mup)
+    - **potential** architecture edits (*if* they speed up / improve performance)
+        - [ ] go back and rapidly test a bunch of boring architecture edits (eg. MLP activation functions) to see whether those chosen by Modded-NanoGPT were really just over-fitting their dataset
         - [ ] MLA or deepseek's new sparse attention?
 - `download_fineweb.py`
-    - [ ] add options for shuffling & a seed
-    - [ ] add more fineweb samples (eg. 350BT, whole thing)
-- [ ] build `train_nanogpt.py` and `train_llama3.py` versions for those who want to work off of a more well known architecture as a base (this would be more expensive due to slower training times)
-    - [ ] continually update `train_gpt.py` & the tokenizer to fit best methods and bring down costs while leaving nanoGPT and llama versions stagnant
+    - [x] add options for shuffling & a seed
+    - [x] add more fineweb samples (eg. 350BT, whole thing?)
+- beginner friendly versions
+    - [ ] build `train_nanogpt.py` as a version for those who want to work off of a more well known architecture as a base (this would be more expensive due to slower training times)
+        - [ ] should use as much of our code as possible but stay true to the architecture, optimizer, etc of NanoGPT
+        - [ ] should either download GPT2's tokenizer from huggingface or we can re-create it using the same regex pattern but on our own data (GPT2 regex is already in `train_tokenizer.py` but commented out)
+    - [ ] build `train_llama3.py` as a version for those who want to work off of a more well known architecture as a base (this would be more expensive due to slower training times)
+        - [ ] there are a lot of missing details that were never released about how Llama3 was trained (such as dropout locations, optimizer, learning rates, etc) that we should fill in with a compromise between efficient methods from `train_gpt.py` and methods that are likely to be easily understandable for someone looking to wor with a simpler repo (eg. don't use Muon)
+        - [ ] going to need sentencepiece or whatever Llama3 used for a tokenizer, not sure
+    - [ ] continually update `train_gpt.py` & the tokenizer to fit best methods and bring down costs while leaving nanoGPT and llama3 versions stagnant
 - [ ] train models on 1x8GB vram, 2x16 GB, 4x32GB, and 8x80GB (for how much data each??) and record how much $ each one cost to run so that people have an estimate before doing their experiments
     - [ ] use chinchilla-optimal model size & data quantity?
-- [ ] write some sort of best-practices guide for amateur experimenters to explain things like "when to keep compute vs parameters vs memory vs etc constant" and "how to properly structure an ablation"
-- [ ] more benchmarks
+    - [ ] set hyperparameter defaults to that of 1x8GB version and leave the others as comments
+- more/improving benchmarks:
+    - [ ] add batched inference support and then use it to speed up hellaswag benchmark
+    - [ ] figure out what additional benchmarks make sense for models of this scale
     - [ ] api calls to a smarter LLM judge for mass comparisons of generated outputs?
-    - [ ] add batched inference to speed up said benchmarks
-    - [ ] figure out what additional benchmarks make sense for model of this scale
+        - [ ] create list of prompts (preferably from some pre-existing well vetted benchmark)
+        - [ ] run model on said prompts right after the hellaswag benchmark
+        - [ ] save outputs in some easily parseable format
+        - [ ] write a script to stay in the root directory that
+            1. takes in the file names of two different models as input (one baseline and one experiment)
+            2. uploads outputs to some smarter LLM API (OpenAI, Anthropic, etc.) and has them pick which of the two outputs is better
+            3. returns a win-rate (50% is random-chance) & confidence interval and saves it to the experiment model's directory
+        - [ ] preferably after we do this once or twice i'd like to record an estimate of how much $ it takes each time so that people know
+        - [ ] optionally instead of the outputs of this prompt being gathered & saved immediately after training we could have this only work for runs that called `--save_model` and therefore have an available .pt file to use, but that'd require storing the .pt files of the baselines somewhere
 - [ ] write latex preprint skeleton for others to begin theirs from
     - [ ] specifics of the Modded-NanoGPT architecture in an appendix
-    - [ ] auto-generated loss plots & benchmark tables to go right into the preprint
-- [ ] implement some sort of post-training/RL once the field settles on a technique?
+    - [ ] write a few scripts that take experiment directories as input and output loss plot, benchmark tables, etc
+- [ ] implement some sort of SFT/RLHF/DPO/RL as an option for the largest scale of model once the field settles on a technique? I don't think this makes sense given that even if our model size is big enough the odds that anybody is training on enough data for a model to be useable is pretty low for the time being
 
 
 
