@@ -69,8 +69,7 @@ def main():
     parser.add_argument("-ss", "--shard_size", type=int, default=10**8, help="Size of each shard in tokens (default 100 million)")
     parser.add_argument("-ns", "--num_shards", type=int, default=None, help="Maximum number of shards to create (defaults to entire dataset)")
     parser.add_argument("-t", "--tokenizer", type=str, default="gpt4regex_v50256_n134217728", help="Filename of custom tokenizer (no default)")
-    parser.add_argument("--shuffle", action="store_true", help="Shuffle the dataset before processing")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for shuffling (default 42)")
+    parser.add_argument("--seed", type=int, default=None, help="Seed for shuffling in a replicable way")
     args = parser.parse_args()
     assert args.tokenizer[-4:] == ".pkl", f"tokenizer must be .pkl"
 
@@ -80,11 +79,10 @@ def main():
     
     # Set up dataset parameters based on version
     is_edu = "edu" in args.version
-    base_version = args.version.replace("edu", "")
-    
     hug_name = "HuggingFaceFW/fineweb-edu" if is_edu else "HuggingFaceFW/fineweb"
     savename = "finewebedu" if is_edu else "fineweb"
     
+    base_version = args.version.replace("edu", "")
     if base_version == "10B":
         remote_name = "sample-10BT"
     elif base_version == "100B":
@@ -94,20 +92,18 @@ def main():
     else:
         raise ValueError(f"Invalid version: {args.version}")
 
-    local_dir = "data"
-
     # create the cache the local directory if it doesn't exist yet
+    local_dir = "data"
     DATA_CACHE_DIR = os.path.join(os.path.dirname(__file__), local_dir)
     os.makedirs(DATA_CACHE_DIR, exist_ok=True)
 
-    # stream the dataset
+    # stream the dataset shuffled by default unless a seed is provided
     fw = load_dataset(hug_name, name=remote_name, split="train", streaming=True)
-    
-    # Shuffle if requested
-    if args.shuffle:
-        print(f"Shuffling dataset with seed {args.seed}")
-        random.seed(args.seed)
-        fw = fw.shuffle(seed=args.seed)
+    fw = fw.shuffle(seed=args.seed or random.randint(0, 2**32 - 1))
+
+    first_doc_text = next(iter(fw))["text"][:500]
+    print("First 500 characters of the first document to demonstrate that dataset is shuffled:")
+    print(first_doc_text)
 
     # Load the tokenizer
     tokenizer_config = pickle.load(open(f"tokenizers/{args.tokenizer}", 'rb'))

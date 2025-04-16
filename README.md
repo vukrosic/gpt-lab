@@ -82,8 +82,8 @@ torchrun --nproc_per_node=G train_gpt.py --model_name ReadmeGPT --tokenizer read
         - [ ] go back and rapidly test a bunch of boring architecture edits (eg. MLP activation functions) to see whether those chosen by Modded-NanoGPT were really just over-fitting their dataset
         - [ ] MLA or deepseek's new sparse attention?
 - `download_fineweb.py`
-    - [ ] add options for shuffling & a seed
-    - [ ] add more fineweb samples (eg. 350BT, whole thing?)
+    - [x] add options for shuffling & a seed
+    - [x] add more fineweb samples (eg. 350BT, whole thing?)
 - beginner friendly versions
     - [ ] build `train_nanogpt.py` as a version for those who want to work off of a more well known architecture as a base (this would be more expensive due to slower training times)
         - [ ] should use as much of our code as possible but stay true to the architecture, optimizer, etc of NanoGPT
