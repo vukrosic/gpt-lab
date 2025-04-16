@@ -46,12 +46,10 @@ torchrun --nproc_per_node=G train_gpt.py --model_name ReadmeGPT --tokenizer read
 
 ## todos / planned features:
 - meta
-    - [ ] write a `contributing.md` to detail best practices for potential non-model code contributors
-    - [ ] write a `how_to_experiment.md` to detail best practices for people looking to conduct scientifically robust experiments. explain things like:
-        - [ ] how to calculate the compute, parameter, memory, etc differences of a given edit
-        - [ ] when to hold compute vs parameters vs memory vs etc constant and when to let one vary
-        - [ ] how to properly structure an ablation
-        - [ ] etc.
+    - [ ] write a `contributing.md` to detail best practices for potential non-model code contributions (bug fixes, minor obvious improvements)
+    - [x] write a `how_to_experiment.md` to detail best practices for people looking to conduct scientifically robust experiments
+        - [ ] improve formatting, specific applicability to this repo, example calclations & scenarios, etc (task for Evin)
+        - [ ] deliniate the difference between an experiment and a contribution. You may do dozens of experiments before hitting on one that's worthy of a contribution, and even then you don't want to just naively merge that fork but rather start a new clean branch & make minimal edits to get to your improvement. Experiments should use the 'new template' button while contributions should use the 'fork' button
     - [ ] write a 'contributing_experiments.md' to detail best practices for people looking to get their experiment incorporated as an improvement to the baseline
         - [ ] have a part of this readme link to all finished experiments above a certain quality, whether they got incorporated or not
     - [ ] build some kind of (semi-)automated testing framework to check each PR for bugs
