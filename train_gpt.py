@@ -655,28 +655,6 @@ if world_size > 1:
 master_process = (rank == 0)  # this process will do logging, checkpointing etc.
 
 #################################################
-#########      Seed for Reproducibility     #####
-#################################################
-
-# Set the seed *before* initializing the model or optimizer
-if args.seed is not None:
-    print(f"Setting random seed to {args.seed}")
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed) # Important for multi-GPU consistency
-        # The following might be needed for full determinism, but can impact performance
-        # torch.backends.cudnn.deterministic = True
-        # torch.backends.cudnn.benchmark = False
-
-#################################################
-#########           logging           ###########
-#################################################
-
-master_process = (rank == 0)  # this process will do logging, checkpointing etc.
-
-#################################################
 #########           logging           ###########
 #################################################
 
@@ -763,6 +741,22 @@ def nvidia_smi():
     return subprocess.run(["nvidia-smi"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout
 print0(nvidia_smi())
 print0("="*100)
+
+#################################################
+#########      Seed for Reproducibility     #####
+#################################################
+
+# Set the seed *before* initializing the model or optimizer
+if args.seed is not None:
+    print0(f"Setting random seed to {args.seed} for model initialization", console=True)
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed) # Important for multi-GPU consistency
+        # The following might be needed for full determinism, but can impact performance
+        # torch.backends.cudnn.deterministic = True
+        # torch.backends.cudnn.benchmark = False
 
 ########################################
 #    Construct model and optimizer     #
@@ -1231,8 +1225,8 @@ def sample_from_model(model, prompt, max_new_tokens=100, temperature=0.8, top_k=
     return decode(y.tolist())
 
 # Then at the end of training:
-# by allowing them both to do it but only printing from master we avoid messing with dist.barrier() in mask creation
 if master_process: 
+    print0("-"*10 + " EXAMPLE MODEL GENERATIONS AFTER TRAINING " + "-"*10)
     prompts = [
         "Once upon a time,",
         "The meaning of life is",
