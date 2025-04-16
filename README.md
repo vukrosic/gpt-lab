@@ -64,6 +64,7 @@ torchrun --nproc_per_node=G train_gpt.py --model_name ReadmeGPT --tokenizer read
     - [ ] make default dataset size auto-estimate GPU vram that'll be taken up & set to fill it up
     - [ ] change dataloader to load small chunks of dataset at a time from SSD to CPU-RAM to VRAM; just now I trained `tokenizers/gpt4regex_v50256_n1000000000.pkl` on 8x4070Ti's but only filled up 6-7GB of their available 16GB since for a dataset any larger the CPU would run out of memory before I could even get data onto the GPU
     - [ ] switch the backup/logging to be more `train_gpt.py` style. keep the `.pkl` for actual use (storage of regex pattern & merges) but save it in a folder alongside a `.txt` backup of `train_tokenizer.py` and another `.txt` file to list out & visualize all the merges
+        - [ ] make corresponding changes inside `train_gpt.py`
 - `train_gpt.py`
     - [ ] confirm code still works datacenter GPUs
         - [x] single
@@ -78,6 +79,7 @@ torchrun --nproc_per_node=G train_gpt.py --model_name ReadmeGPT --tokenizer read
                 - [ ] make full-sliding pattern dynamically account for different numbers of model layers (similar to description of value embeddings above)
             - [ ] gradually increase window size as a function of training steps
         - [ ] user Liger kernel's fused CE Loss (or are we only using pytorch for this file and splitting off a separate version that's allowed to use custom kernels? idk) which would require either making our own custom version or getting rid of the scaling in-between the logits & the CE Loss
+        - [ ] implement [mu-parameterization](https://github.com/EleutherAI/nanoGPT-mup)
     - **potential** architecture edits (*if* they speed up / improve performance)
         - [ ] go back and rapidly test a bunch of boring architecture edits (eg. MLP activation functions) to see whether those chosen by Modded-NanoGPT were really just over-fitting their dataset
         - [ ] MLA or deepseek's new sparse attention?
