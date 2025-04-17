@@ -73,7 +73,7 @@ torchrun --nproc_per_node=G train_gpt.py --model_name ReadmeGPT --tokenizer read
         - [x] adjust value embeddings to dynamically account for any number of layers to be either a function of model size, learnable, or something else that makes more sense
         - [ ] change values originally over-optimized for GPT2-124m 
             - [x] attention head scaling factor
-            - [ ] output logits scale
+            - [ ] are there any more?
         - [ ] re-implement Modded-NanoGPT's original attention masks (see [`def create_blockmasks()`](https://github.com/KellerJordan/modded-nanogpt/blob/master/train_gpt.py)
             - [ ] alternate between full-causal and sliding-window attention
                 - [ ] make full-sliding pattern dynamically account for different numbers of model layers (similar to description of value embeddings above)

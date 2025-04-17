@@ -378,19 +378,15 @@ class GPT(nn.Module):
         self.value_embeds = nn.ModuleList([nn.Embedding(vocab_size, model_dim) for _ in range(num_val_emb)])
         self.blocks = nn.ModuleList([Block(model_dim, num_heads, mlp_ratio, max_seq_len, i) for i in range(num_layers)])
         # there are only 50257 unique GPT-2 tokens; we extend to nearest multiple of 128 for efficiency.
-        # suggested to me by @Grad62304977. this originates from Karpathy's experiments.
+        # suggested by @Grad62304977. this originates from Karpathy's experiments.
         self.lm_head = CastedLinear(model_dim, next_multiple_of_n(vocab_size, n=128),
-                                    use_fp8=True, x_s=(model_dim**0.5)/448, w_s=24/448, grad_s=1/448)
+                                    use_fp8=False, x_s=(model_dim**0.5)/448, w_s=24/448, grad_s=1/448)
         self.lm_head.weight.detach().zero_() # @Grad62304977
         # Add learnable skip connection weights for decoder layers
-        assert num_layers % 2 == 0, f"Number of layers ({num_layers}) must be even for skip connections"
         self.skip_weights = nn.Parameter(torch.ones(num_layers//2))
 
-    def forward(self, 
-                input_seq: Tensor, # shape (B*N)
-                target_seq: Tensor = None, # (B*N)
-                ):
-        assert input_seq.ndim == 1
+    def forward(self, input_seq: Tensor, target_seq: Tensor = None):
+        assert input_seq.ndim == 1 # shape (B*N)
 
         # value emeddings provide extra info about a token at the first & final few layers
         ve = [value_embed(input_seq) for value_embed in self.value_embeds] # each (B*N, D)
@@ -538,24 +534,24 @@ def distributed_data_generator(filename_pattern: str, batch_size: int, rank: int
 @dataclass
 class Hyperparameters:
     """
-    default values are set to fit on a GPU w/ 8GB of VRAM, but are not necessarily optimal
+    default values are set to fit on a 2x GPUs w/ 8GB of VRAM each, but are not necessarily optimal
     """
     model_name = "ModdedGPT"
     # data
     train_files = "data/fineweb*_train_*.bin" # input .bin to train on
     val_files = "data/fineweb*_val_*.bin" # input .bin to eval validation loss on
     train_seq_len = 16*1024 # FlexAttention sequence length
-    val_seq_len = 16*1024 # FlexAttention sequence length for validation (should be able to fit more than train_seq_len)
+    val_seq_len = 32*1024 # FlexAttention sequence length for validation (should be able to fit more than train_seq_len)
     # optimization loop
     val_steps = 10 # number of steps to run validation for
-    train_steps = 200#_000 # number of training steps to run
+    train_steps = 20#_000 # number of training steps to run
     grad_acc_steps = 1 # number of gradient accumulation steps per training step
     cooldown_frac = 0.4 # fraction of training spent cooling down the learning rate
     # architecture
     tokenizer = "gpt4regex_v50256_n1000000000.pkl"# any .pkl file in tokenizers/
     vocab_size = 50257 # should be the tokenizer's size plus any special tokens
     # model size - parameters set for GPUs w/ 8GB VRAM
-    num_layers = 10  # number of reansformer blocks
+    num_layers = 12  # number of reansformer blocks
     num_heads = 6   # number of attention heads
     model_dim = 384  # size of model embedding vectors
     head_dim = None  # size of attention heads; if None, will default to model_dim // num_heads
@@ -610,11 +606,9 @@ class Hyperparameters:
         parser.add_argument('--num_val_emb', type=int, help='Number of value embeddings used at initial and final layers')
         
         # Other options
-        parser.add_argument('--hopper', action='store_true', help='Set to true on H100s (and newer?) for improved performance')
-        parser.add_argument('--not_hopper', action='store_false', dest='hopper', help='Use if not on a hopper GPU')
+        parser.add_argument('--hopper', type=lambda x: (str(x).lower() == 'true'), default=None, help='Set to true on H100s (and newer?) for improved performance')
         parser.add_argument('--val_loss_every', type=int, help='Evaluate validation loss every N steps')
-        parser.add_argument('--save_model', action='store_true', help='Save model checkpoints')
-        parser.add_argument('--no_save_model', action='store_false', dest='save_model', help='Disable model checkpoints')
+        parser.add_argument('--save_model', type=lambda x: (str(x).lower() == 'true'), default=None, help='Save model checkpoints')
         parser.add_argument('--model_name', type=str, help='Model name for logging')
         parser.add_argument('--seed', type=int, help='Random seed for initialization control')
         
