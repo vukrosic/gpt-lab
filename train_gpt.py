@@ -15,7 +15,8 @@ import datetime
 import pickle
 import shutil
 import csv
-import random # Import random for potential future use, though not strictly needed for torch seeding
+import random
+import math
 import numpy as np # Import numpy for potential future use, set random seed now not to forget to set it later
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -294,6 +295,7 @@ class CausalSelfAttention(nn.Module):
         if head_dim is None:
             head_dim = dim // num_heads
         self.head_dim = head_dim
+        self.scale = 1 / math.sqrt(head_dim)
         hdim = num_heads * head_dim
         std = 0.5 * (dim ** -0.5)
         bound = (3 ** 0.5) * std # improved init scale by @YouJiacheng
@@ -317,7 +319,11 @@ class CausalSelfAttention(nn.Module):
             v = self.lambdas[0] * v
         # scale the attention logits by given constant, instead of the default head_dim**-0.5, by @leloykun
         # inspired by learnable scalars used by @brendanh0gan https://x.com/hi_tysam/status/1879693583898591283
-        y = flex_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), block_mask=block_mask, scale=0.12).transpose(1, 2)
+        y = flex_attention(
+            q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), 
+            block_mask=block_mask, 
+            scale=self.scale
+        ).transpose(1, 2)
         y = y.contiguous().view(B, T, self.num_heads * self.head_dim) # re-assemble all head outputs side by side
         y = self.c_proj(y)
         return y

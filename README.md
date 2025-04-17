@@ -70,8 +70,10 @@ torchrun --nproc_per_node=G train_gpt.py --model_name ReadmeGPT --tokenizer read
             - [ ] fix flex-attention backward torch.compile bug
     - [x] add in optional parameter initialization control through a seed into hyperparameters
     - **planned** architecture edits (*if* they speed up / improve performance)
-        - [x] adjust value embeddings to dynamically account for any number of layers
-        - [ ] change values originally over-optimized for GPT2-124m (such as the attention head scaling factor & output logits scaling) to be either a function of model size, learnable, or something else that makes more sense
+        - [x] adjust value embeddings to dynamically account for any number of layers to be either a function of model size, learnable, or something else that makes more sense
+        - [ ] change values originally over-optimized for GPT2-124m 
+            - [x] attention head scaling factor
+            - [ ] output logits scale
         - [ ] re-implement Modded-NanoGPT's original attention masks (see [`def create_blockmasks()`](https://github.com/KellerJordan/modded-nanogpt/blob/master/train_gpt.py)
             - [ ] alternate between full-causal and sliding-window attention
                 - [ ] make full-sliding pattern dynamically account for different numbers of model layers (similar to description of value embeddings above)
