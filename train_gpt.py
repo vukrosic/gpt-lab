@@ -360,14 +360,16 @@ def next_multiple_of_n(v: float | int, *, n: int):
     return next(x for x in range(n, int(v) + 1 + n, n) if x >= v)
 
 class GPT(nn.Module):
-    def __init__(self, vocab_size: int, num_layers: int, num_heads: int, model_dim: int, max_seq_len: int, mlp_ratio: int):
+    def __init__(self, 
+    vocab_size: int, num_layers: int, num_val_emb: int, num_heads: int, model_dim: int, max_seq_len: int, mlp_ratio: int
+    ):
         super().__init__()
         self.model_dim = model_dim
         self.max_seq_len = max_seq_len
         self.embed = nn.Embedding(vocab_size, model_dim)
         # token value embeddings by @KoszarskyB - inspired by @Grad62304977's value residual implementation following https://arxiv.org/abs/2410.17897
         # value embedding code simplification inspired by @ragulpr https://github.com/KellerJordan/modded-nanogpt/pull/78
-        self.value_embeds = nn.ModuleList([nn.Embedding(vocab_size, model_dim) for _ in range(3)])
+        self.value_embeds = nn.ModuleList([nn.Embedding(vocab_size, model_dim) for _ in range(num_val_emb)])
         self.blocks = nn.ModuleList([Block(model_dim, num_heads, mlp_ratio, max_seq_len, i) for i in range(num_layers)])
         # there are only 50257 unique GPT-2 tokens; we extend to nearest multiple of 128 for efficiency.
         # suggested to me by @Grad62304977. this originates from Karpathy's experiments.
@@ -382,12 +384,11 @@ class GPT(nn.Module):
                 input_seq: Tensor, # shape (B*N)
                 target_seq: Tensor = None, # (B*N)
                 ):
-        # sliding_window_num_blocks is tensor of shape (w) dtype int32 were w is number of blocks flexattention will use
         assert input_seq.ndim == 1
 
+        # value emeddings provide extra info about a token at the first & final few layers
         ve = [value_embed(input_seq) for value_embed in self.value_embeds] # each (B*N, D)
-        # Adjust token value embeddings structure for fewer layers
-        ve = [ve[0], ve[1], ve[2]] + [None] * (len(self.blocks) - 6) + [ve[0], ve[1], ve[2]]
+        ve = [ve[i] for i in range(len(ve))] + [None] * (len(self.blocks) - len(ve)*2) + [ve[i] for i in range(len(ve))]
         assert len(ve) == len(self.blocks)
 
         # creating flex-attentio mask
@@ -541,18 +542,19 @@ class Hyperparameters:
     val_seq_len = 16*1024 # FlexAttention sequence length for validation (should be able to fit more than train_seq_len)
     # optimization loop
     val_steps = 10 # number of steps to run validation for
-    train_steps = 20#_000 # number of training steps to run
+    train_steps = 200#_000 # number of training steps to run
     grad_acc_steps = 1 # number of gradient accumulation steps per training step
     cooldown_frac = 0.4 # fraction of training spent cooling down the learning rate
     # architecture
     tokenizer = "gpt4regex_v50256_n1000000000.pkl"# any .pkl file in tokenizers/
-    vocab_size = 50257 # should be the tokenizer's size plus any special tokens defined in this script
-    # model size - new parameters for GPUs w/ at least 8GB VRAM during testing
-    num_layers = 10  # 124m param model should be 12
-    num_heads = 6   # 124m param model should be 6
-    model_dim = 384  # must be divisible by num_heads
-    head_dim = None  # if None, will be set to model_dim // num_heads
-    mlp_ratio = 4  # 124m param model should be 4
+    vocab_size = 50257 # should be the tokenizer's size plus any special tokens
+    # model size - parameters set for GPUs w/ 8GB VRAM
+    num_layers = 10  # number of reansformer blocks
+    num_heads = 6   # number of attention heads
+    model_dim = 384  # size of model embedding vectors
+    head_dim = None  # size of attention heads; if None, will default to model_dim // num_heads
+    mlp_ratio = 4  # MLP hidden dimension is model_dim * mlp_ratio
+    num_val_emb = 2 # number of value embeddings used at initial and final layers
     # memory optimization 
     hopper = False # Set to True on H100s (and newer?) for improved performance, False on older
     # evaluation and logging
@@ -562,16 +564,17 @@ class Hyperparameters:
     seed: int | None = None # Optional random seed for initialization control
 
     def __post_init__(self):
-        # Validate and set derived param eters
+        # Validate and set derived parameters
+        assert self.train_seq_len % 128 == 0, f"train_seq_len must be multiple of 128, got {self.train_seq_len}"
+        assert self.val_seq_len % 128 == 0, f"val_seq_len must be multiple of 128, got {self.val_seq_len}"
+        assert self.grad_acc_steps >= 1, f"grad_acc steps must be int >= 1"
         if self.head_dim is None:
             self.head_dim = self.model_dim // self.num_heads
         assert self.head_dim in [2 ** i for i in range(1, 10)], f"head_dim must be a power of 2, got {self.head_dim}"
         assert self.mlp_ratio > 0, f"mlp_ratio must be positive, got {self.mlp_ratio}"
-        assert self.train_seq_len % 128 == 0, f"train_seq_len must be multiple of 128, got {self.train_seq_len}"
-        assert self.val_seq_len % 128 == 0, f"val_seq_len must be multiple of 128, got {self.val_seq_len}"
-        assert self.num_layers >= 2, f"num_layers must be greater than or equal to 2 because of attention mask structure, got {self.num_layers}"
-        assert self.num_layers >= 6, f"num_layers must be greater than or equal to 2 because of value embeddings structure, got {self.num_layers}"
-        assert self.grad_acc_steps >= 1, f"grad_acc steps must be int >= 1"
+        assert self.num_layers // 2 >= self.num_val_emb, \
+            f"num_layers // 2 (={self.num_layers // 2}) must be greater than or equal num_val_emb (={self.num_val_emb})"
+        assert self.num_layers % 2 == 0, f"Number of layers ({self.num_layers}) must be even for skip connections"
 
     @classmethod
     def from_args(cls):
@@ -598,6 +601,7 @@ class Hyperparameters:
         parser.add_argument('--model_dim', type=int, help='Model embedding dimension')
         parser.add_argument('--head_dim', type=int, help='Dimension per attention head')
         parser.add_argument('--mlp_ratio', type=int, help='MLP hidden dim ratio')
+        parser.add_argument('--num_val_emb', type=int, help='Number of value embeddings used at initial and final layers')
         
         # Other options
         parser.add_argument('--hopper', action='store_true', help='Set to true on H100s (and newer?) for improved performance')
@@ -764,6 +768,7 @@ if args.seed is not None:
 
 model: nn.Module = GPT(vocab_size=args.vocab_size, 
                        num_layers=args.num_layers,
+                       num_val_emb=args.num_val_emb,
                        num_heads=args.num_heads, 
                        model_dim=args.model_dim,
                        max_seq_len=max(args.train_seq_len, args.val_seq_len),

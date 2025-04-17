@@ -70,7 +70,7 @@ torchrun --nproc_per_node=G train_gpt.py --model_name ReadmeGPT --tokenizer read
             - [ ] fix flex-attention backward torch.compile bug
     - [x] add in optional parameter initialization control through a seed into hyperparameters
     - **planned** architecture edits (*if* they speed up / improve performance)
-        - [ ] adjust value embeddings to dynamically account for any number of layers & therefore no longer require a minimum of 6. currently the 3 value embeddings get added to the first 3 and last 3 layers no matter how many layers you have, but we need some way to determine how many value embeddings to initialize and what layers to put them on as a function of how many layers there are. for a rough example, 1-2 layers probably no value embeddings, 3-6 let's make one and put them on first & final layer, 7-11 make 2 VEs and put them on first two & final two layers, 12-23 do three VEs, 24-47 do four VEs, etc
+        - [x] adjust value embeddings to dynamically account for any number of layers
         - [ ] change values originally over-optimized for GPT2-124m (such as the attention head scaling factor & output logits scaling) to be either a function of model size, learnable, or something else that makes more sense
         - [ ] re-implement Modded-NanoGPT's original attention masks (see [`def create_blockmasks()`](https://github.com/KellerJordan/modded-nanogpt/blob/master/train_gpt.py)
             - [ ] alternate between full-causal and sliding-window attention
