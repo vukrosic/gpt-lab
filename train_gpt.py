@@ -537,10 +537,9 @@ class Hyperparameters:
     # data
     train_files = "data/fineweb*_train_*.bin" # input .bin to train on
     val_files = "data/fineweb*_val_*.bin" # input .bin to eval validation loss on
-    #val_tokens = 10485760 # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
     train_seq_len = 16*1024 # FlexAttention sequence length
     val_seq_len = 16*1024 # FlexAttention sequence length for validation (should be able to fit more than train_seq_len)
-    # optimization
+    # optimization loop
     val_steps = 10 # number of steps to run validation for
     train_steps = 20#_000 # number of training steps to run
     grad_acc_steps = 1 # number of gradient accumulation steps per training step
@@ -896,14 +895,14 @@ for step in range(args.train_steps + 1):
         val_loader = distributed_data_generator(args.val_files, val_batch_size, rank, world_size, print_stats=False)
         val_loss = 0
         with torch.no_grad():
-            for i in range(val_steps):
+            for i in range(args.val_steps):
                 inputs, targets = next(val_loader)
                 # Check if inputs exceed sequence length
                 if inputs.size(0) > args.val_seq_len:
                     inputs = inputs[:args.val_seq_len]
                     targets = targets[:args.val_seq_len]
                 val_loss += model(inputs, targets)
-        val_loss /= val_steps
+        val_loss /= args.val_steps
         del val_loader
         if world_size > 1:
             dist.all_reduce(val_loss, op=dist.ReduceOp.AVG)
