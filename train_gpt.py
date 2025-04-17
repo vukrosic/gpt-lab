@@ -558,7 +558,7 @@ class Hyperparameters:
     mlp_ratio = 4  # MLP hidden dimension is model_dim * mlp_ratio
     num_val_emb = 2 # number of value embeddings used at initial and final layers
     # memory optimization 
-    hopper = False # Set to True on H100s (and newer?) for improved performance, False on older
+    use_fp8 = False # experimental; True on H100s (and newer?) should improve performance but seems to use more vram somehow
     # evaluation and logging
     val_loss_every = 100 # every how many steps to evaluate val loss? 0 for only at the end
     save_model = False
@@ -606,7 +606,8 @@ class Hyperparameters:
         parser.add_argument('--num_val_emb', type=int, help='Number of value embeddings used at initial and final layers')
         
         # Other options
-        parser.add_argument('--hopper', type=lambda x: (str(x).lower() == 'true'), default=None, help='Set to true on H100s (and newer?) for improved performance')
+        parser.add_argument('--use_fp8', type=lambda x: (str(x).lower() == 'true'), default=None, 
+                            help='experimental; True on H100s (and newer?) should improve performance but seems to use more vram somehow')
         parser.add_argument('--val_loss_every', type=int, help='Evaluate validation loss every N steps')
         parser.add_argument('--save_model', type=lambda x: (str(x).lower() == 'true'), default=None, help='Save model checkpoints')
         parser.add_argument('--model_name', type=str, help='Model name for logging')
@@ -777,7 +778,7 @@ print0(f'{model.get_num_params()} parameters', console=True)
 print0(model)
 
 # Set FP8 option based on hyperparameters
-model.lm_head.use_fp8 = args.hopper
+model.lm_head.use_fp8 = args.use_fp8
 
 for m in model.modules():
     if isinstance(m, nn.Embedding):
@@ -823,7 +824,10 @@ def get_lr(step: int):
         return w * 1.0 + (1 - w) * 0.1
 
 # Use a more memory-efficient compilation option
-model: nn.Module = torch.compile(model, dynamic=False, mode="reduce-overhead")
+if args.use_fp8:
+    model: nn.Module = torch.compile(model, dynamic=False)
+else:
+    model: nn.Module = torch.compile(model, dynamic=False, mode="reduce-overhead")
 
 # Add fallback mode to handle compilation errors
 import torch._dynamo

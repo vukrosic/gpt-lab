@@ -28,7 +28,7 @@ torchrun --nproc_per_node=G train_tokenizer.py --samples 100000 --vocabsize 1000
 ```
 5. download the [fineweb](https://huggingface.co/datasets/HuggingFaceFW/fineweb) dataset and convert all the raw text into tokens. dataset options are 10B, 100B, 10Bedu (default), or 100Bedu. tune shard_size (default 100 million) and num_shards to the quantity of data for your desired training run length. the script will only create one shard for the validation set which is not included in the count of num_shards
 ```
-python download_fineweb.py --version 10B --shard_size 10000000 --num_shards 1 --tokenizer readmetokenizer_v1000_n100000.pkl
+python download_fineweb.py --num_shards 1 --version 10B --shard_size 10000000 --tokenizer readmetokenizer_v1000_n100000.pkl
 ```
 6. download the hellaswag benchmark: `python download_hellaswag.py`
 7. train your language model. vocabulary size must be equial to your tokenizer size PLUS any special tokens defined in this script (1 for '<|endoftext|>', so 1000 + 1 = 10001). **WARNING:** if you include `--save_model` that will create a `.pt` file of the model weights, but by default the `.gitignore` will now allow this file to be pushed to github with the rest of the repo. this is done because the filesize is too large for github, and it means you have to find a way to download the model weights manually if you're on a cloud GPU and want to keep them
@@ -64,10 +64,11 @@ torchrun --nproc_per_node=G train_gpt.py --model_name ReadmeGPT --tokenizer read
     - [ ] switch the backup/logging to be more `train_gpt.py` style. keep the `.pkl` for actual use (storage of regex pattern & merges) but save it in a folder alongside a `.txt` backup of `train_tokenizer.py` and another `.txt` file to list out & visualize all the merges
         - [ ] make corresponding changes inside `train_gpt.py`
 - `train_gpt.py`
-    - [ ] confirm code still works datacenter GPUs
+    - [x] fix peak memory printout
+    - [x] confirm code still works datacenter GPUs
         - [x] single
-        - [ ] DDP
-            - [ ] fix flex-attention backward torch.compile bug
+        - [x] DDP
+            - [x] fix fp8 on hopper bug
     - [x] add in optional parameter initialization control through a seed into hyperparameters
     - **planned** architecture edits (*if* they speed up / improve performance)
         - [x] adjust value embeddings to dynamically account for any number of layers to be either a function of model size, learnable, or something else that makes more sense
