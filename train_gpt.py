@@ -537,10 +537,11 @@ class Hyperparameters:
     # data
     train_files = "data/fineweb*_train_*.bin" # input .bin to train on
     val_files = "data/fineweb*_val_*.bin" # input .bin to eval validation loss on
-    val_tokens = 10485760 # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
+    #val_tokens = 10485760 # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
     train_seq_len = 16*1024 # FlexAttention sequence length
-    val_seq_len = 16*1024 # FlexAttention sequence length for validation
+    val_seq_len = 16*1024 # FlexAttention sequence length for validation (should be able to fit more than train_seq_len)
     # optimization
+    val_steps = 10 # number of steps to run validation for
     train_steps = 20#_000 # number of training steps to run
     grad_acc_steps = 1 # number of gradient accumulation steps per training step
     cooldown_frac = 0.4 # fraction of training spent cooling down the learning rate
@@ -581,11 +582,11 @@ class Hyperparameters:
         # Data arguments
         parser.add_argument('--train_files', type=str, help='Pattern for training data files')
         parser.add_argument('--val_files', type=str, help='Pattern for validation data files')
-        parser.add_argument('--val_tokens', type=int, help='Number of tokens for validation')
         parser.add_argument('--train_seq_len', type=int, help='Training sequence length')
         parser.add_argument('--val_seq_len', type=int, help='Validation sequence length')
         
         # Optimization arguments
+        parser.add_argument('--val_steps', type=int, help='Number of steps to run validation for')
         parser.add_argument('--train_steps', type=int, help='Number of training iterations')
         parser.add_argument('--grad_acc_steps', type=int, help='Number of gradient accumulation steps per training iteration')
         parser.add_argument('--cooldown_frac', type=float, help='Fraction of training for learning rate cooldown')
@@ -843,7 +844,7 @@ for _ in range(warmup_steps):
     for _ in range(args.grad_acc_steps):
         inputs = targets = torch.randint(0, args.vocab_size, size=(args.train_seq_len,), device="cuda", dtype=torch.int64)
         #torch.compiler.cudagraph_mark_step_begin()
-            # TODO why does un-cpmmenting this^ line throw an error here in the warmup but not down in training?
+            # TODO why does un-commenting this^ line throw an error here in the warmup but not down in training?
         step_loss = model(inputs.to(torch.int32), targets)
         loss += step_loss / args.grad_acc_steps
     loss.backward()
@@ -889,9 +890,8 @@ for step in range(args.train_steps + 1):
         
         # Ensure we validate on enough tokens while keeping memory usage reasonable
         val_batch_size = world_size * args.val_seq_len
-        val_steps = max(1, min(16, args.val_tokens // val_batch_size))
-        val_tokens_used = val_batch_size * val_steps
-        print0(f"Validating on {val_tokens_used} tokens ({val_steps} steps with {val_batch_size} batch size)", console=True)
+        val_tokens_used = val_batch_size * args.val_steps
+        print0(f"Validating on {val_tokens_used} tokens ({args.val_steps} steps with {val_batch_size} batch size)", console=True)
         
         val_loader = distributed_data_generator(args.val_files, val_batch_size, rank, world_size, print_stats=False)
         val_loss = 0

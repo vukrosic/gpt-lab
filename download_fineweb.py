@@ -54,7 +54,33 @@ def write_datafile(filename, toks):
         f.write(header.tobytes())
         f.write(toks_np.tobytes())
 
-def tokenize(doc, enc, eot):
+# Define the tokenizer loading logic as a separate function
+def load_tokenizer(tokenizer_path):
+    tokenizer_config = pickle.load(open(tokenizer_path, 'rb'))
+    enc = tiktoken.Encoding(
+        name=tokenizer_path.split('/')[-1][:-4], # Use filename without extension as name
+        pat_str=tokenizer_config['pat_str'],
+        mergeable_ranks=tokenizer_config['mergeable_ranks'],
+        special_tokens={
+            "<|endoftext|>": len(tokenizer_config['mergeable_ranks']),
+        }
+    )
+    eot = enc._special_tokens['<|endoftext|>']
+    return enc, eot
+
+# Modify tokenize to accept tokenizer_path and initialize enc inside if needed
+# This function might be called by multiple processes, so handle initialization carefully.
+# A global variable approach to avoid reloading in the same process.
+_tokenizer_cache = {}
+def tokenize_doc(doc, tokenizer_path):
+    global _tokenizer_cache
+    # Initialize tokenizer for this process if not already done
+    if tokenizer_path not in _tokenizer_cache:
+        enc, eot = load_tokenizer(tokenizer_path)
+        _tokenizer_cache[tokenizer_path] = (enc, eot)
+    
+    enc, eot = _tokenizer_cache[tokenizer_path]
+
     # tokenizes a single document and returns a numpy array of uint16 tokens
     tokens = [eot] # the special <|endoftext|> token delimits all documents
     tokens.extend(enc.encode_ordinary(doc["text"]))
@@ -65,10 +91,14 @@ def tokenize(doc, enc, eot):
 
 def main():
     parser = argparse.ArgumentParser(description="FineWeb dataset preprocessing")
-    parser.add_argument("-v", "--version", type=str, default="10Bedu", help="Which version of fineweb to use? 10B|100B|350B|10Bedu|100Bedu|350Bedu (default 10Bedu)")
-    parser.add_argument("-ss", "--shard_size", type=int, default=10**8, help="Size of each shard in tokens (default 100 million)")
-    parser.add_argument("-ns", "--num_shards", type=int, default=None, help="Maximum number of shards to create (defaults to entire dataset)")
-    parser.add_argument("-t", "--tokenizer", type=str, default="gpt4regex_v50256_n134217728", help="Filename of custom tokenizer (no default)")
+    parser.add_argument("-v", "--version", type=str, default="10Bedu", 
+                        help="Which version of fineweb to use? 10B|100B|350B|10Bedu|100Bedu|350Bedu (default 10Bedu)")
+    parser.add_argument("-ss", "--shard_size", type=int, default=10**8, 
+                        help="Size of each shard in tokens (default 100 million)")
+    parser.add_argument("-ns", "--num_shards", type=int, default=None, 
+                        help="Maximum number of shards to create (defaults to entire dataset)")
+    parser.add_argument("-t", "--tokenizer", type=str, default="gpt4regex_v50256_n1000000000.pkl", 
+                        help="Filename of custom tokenizer (default `gpt4regex_v50256_n1000000000.pkl`)")
     parser.add_argument("--seed", type=int, default=None, help="Seed for shuffling in a replicable way")
     args = parser.parse_args()
     assert args.tokenizer[-4:] == ".pkl", f"tokenizer must be .pkl"
@@ -100,35 +130,29 @@ def main():
     # stream the dataset shuffled by default unless a seed is provided
     fw = load_dataset(hug_name, name=remote_name, split="train", streaming=True)
     fw = fw.shuffle(seed=args.seed or random.randint(0, 2**32 - 1))
+    print("First 500 characters of the first document:")
+    print(next(iter(fw))["text"][:500])
 
-    first_doc_text = next(iter(fw))["text"][:500]
-    print("First 500 characters of the first document to demonstrate that dataset is shuffled:")
-    print(first_doc_text)
+    # Only need the tokenizer path now, loading happens in workers
+    tokenizer_path = f"tokenizers/{args.tokenizer}"
+    # We might still need eot value in main logic, but let's check.
+    # Let's load it once here just to be sure, though it's not passed to pool.
+    # _, eot = load_tokenizer(tokenizer_path) # Actually, eot is only needed inside tokenize_doc
 
-    # Load the tokenizer
-    tokenizer_config = pickle.load(open(f"tokenizers/{args.tokenizer}", 'rb'))
-    enc = tiktoken.Encoding(
-        name=args.tokenizer[:-4], # :-4 to remove the .pkl
-        pat_str=tokenizer_config['pat_str'],
-        mergeable_ranks=tokenizer_config['mergeable_ranks'],
-        special_tokens={
-            "<|endoftext|>": len(tokenizer_config['mergeable_ranks']),
-        }
-    )
-    eot = enc._special_tokens['<|endoftext|>'] # end of text token
-    
-    # Create a partial function with the enc and eot parameters
-    tokenize_with_params = partial(tokenize, enc=enc, eot=eot)
+    # Create a partial function with the tokenizer_path parameter
+    tokenize_partial = partial(tokenize_doc, tokenizer_path=tokenizer_path)
 
     # tokenize all documents and write output shards, each of shard_size tokens (last shard has remainder)
     nprocs = max(1, os.cpu_count() - 2) # don't hog the entire system
+    print(f"Using {nprocs} processes for tokenization.")
     with mp.Pool(nprocs) as pool:
         shard_index = 0
         # preallocate buffer to hold current shard
         all_tokens_np = np.empty((args.shard_size,), dtype=np.uint16)
         token_count = 0
         progress_bar = None
-        for tokens in pool.imap(tokenize_with_params, fw, chunksize=16):
+        # Pass the partial function which only captures the path (a string)
+        for tokens in pool.imap(tokenize_partial, fw, chunksize=16):
             # is there enough space in the current shard for the new tokens?
             if token_count + len(tokens) < args.shard_size:
                 # simply append tokens to current shard
