@@ -42,18 +42,33 @@ multiple GPUs (replace `G`):
 torchrun --nproc_per_node=G train_gpt.py --model_name ReadmeGPT --tokenizer readmetokenizer_v1000_n100000.pkl --vocab_size 1001 --model_dim 128 --num_heads 4 --num_layers 6
 ```
 8. look in `experiments/` for your model. you should see 1) a `.txt` backup of all the `.py` files we just ran at the time of training (except `train_tokenizer.py`, which is backed inside the tokenizer `.pkl` file and therefore not readable from a file browser), 2) a `.csv` containing the training time & loss, 3) a log file containing important information such as the hellaswag benchmark score and the maximum memory allocated during training, and 4) maybe a `.pt` file if you elected to run with `--save_model`
-9. great, now that all that is confirmed to be up & working you can start editing the code and running your own experiments!
+9. great, now that all that is confirmed to be up & working you can start editing the code and running your own experiments by building off the baselines below!
+
+## baselines
+
+we've trained some baselines for your experiments to compare against. For now (while the repo is in alpha/beta), they are absurdly sh\*tty and really only here for demonstration purposes. As the repo improves, we will push new improved baselines of larger sizes, with better tuned hyperparameters, trained on more tokens, etc. The goal is to eventually closely resemble the GPT2 series of models in parameter count (maybe even larger) and train on as many tokens as possible while still keeping costs realistic for dedicated amateurs
+| Baseline             | XS                | S                | M                |
+| :------------------ | :-------------------------- | :--------------------------- | :--------------------------- |
+| **Parameters (millions)**      | 57.8                       | 117.7                       | 342.5                       |
+| **Tokens Traind On (billions)**      | 0.1                       | 0.4                       | 1.0                       |
+| **GPU**             | RTX 3070                    | RTX 4060 Ti                  | A40                          |
+| **VRAM Per GPU**  | 8GB                         | 16GB                         | 45GB                         |
+| **GPU Count**       | 1                           | 2                            | 4                            |
+| **GPU Cost  Per Hour (US Dollars)** | $0.113                      | $0.257                       | $1.761                       |
+| **Trainimg Time (minutes)**| 12.02                       | 51.59                        | 94.93                       |
+| ***Estimated* Total Cost (US Dollars)**  | $0.14                       | $0.48                        | $4.55                        |
+
+*NOTES:* 
+- Total cost is estimated as `Total Cost = ((Training Time) + (60 minutes)) * (GPU Cost  Per Hour)` to reflect the overhead of starting up your cloud GPU instance, testing which hyperparameters best utilize VRAM, running validation data and benchmarks, pushing changes and closing down your instance.
+- All costs reflect GPUs rented from [vast.ai](vast.ai) on Apr 18, 2025
 
 ## todos / planned features:
 - meta
     - [ ] write a `contributing.md` to detail best practices for potential non-model code contributions (bug fixes, minor obvious improvements)
     - [x] write a `how_to_experiment.md` to detail best practices for people looking to conduct scientifically robust experiments
-        - [ ] improve formatting, specific applicability to this repo, example calclations & scenarios, etc (task for Evin)
+        - [ ] improve formatting, specific applicability to this repo, example calclations & scenarios, etc
         - [ ] deliniate the difference between an experiment and a contribution. You may do dozens of experiments before hitting on one that's worthy of a contribution, and even then you don't want to just naively merge that fork but rather start a new clean branch & make minimal edits to get to your improvement. Experiments should use the 'new template' button while contributions should use the 'fork' button
-    - [ ] write a 'contributing_experiments.md' to detail best practices for people looking to get their experiment incorporated as an improvement to the baseline
-        - [ ] have a part of this readme link to all finished experiments above a certain quality, whether they got incorporated or not
     - [ ] build some kind of (semi-)automated testing framework to check each PR for bugs
-    - [ ] switch to legit versionioning rather than sloppily working on main branch
 - [ ] excessively comment and explain everything that's happening in each file
     - [ ] tensor shapes for every operation
     - [ ] ensure consistency in comment style (eg. choose between (B,N,D) and (batch_size, seq_len, model_dim))
@@ -95,9 +110,9 @@ torchrun --nproc_per_node=G train_gpt.py --model_name ReadmeGPT --tokenizer read
         - [ ] there are a lot of missing details that were never released about how Llama3 was trained (such as dropout locations, optimizer, learning rates, etc) that we should fill in with a compromise between efficient methods from `train_gpt.py` and methods that are likely to be easily understandable for someone looking to wor with a simpler repo (eg. don't use Muon)
         - [ ] going to need sentencepiece or whatever Llama3 used for a tokenizer, not sure
     - [ ] continually update `train_gpt.py` & the tokenizer to fit best methods and bring down costs while leaving nanoGPT and llama3 versions stagnant
-- [ ] train models on 1x8GB vram, 2x16 GB, 4x32GB, and 8x80GB (for how much data each??) and record how much $ each one cost to run so that people have an estimate before doing their experiments
-    - [ ] use chinchilla-optimal model size & data quantity?
-    - [ ] set hyperparameter defaults to that of 1x8GB version and leave the others as comments
+- [x] train models on 1x8GB vram, 2x16 GB, 4x32GB, and 8x80GB (for how much data each??) and record how much $ each one cost to run so that people have an estimate before doing their experiments
+    - [ ] use chinchilla-optimal model size & data quantity
+    - [x] set hyperparameter defaults to that of 1x8GB version
 - more/improving benchmarks:
     - [ ] add batched inference support and then use it to speed up hellaswag benchmark
     - [ ] figure out what additional benchmarks make sense for models of this scale
