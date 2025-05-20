@@ -5,6 +5,7 @@ import time
 import copy
 import glob
 from dataclasses import dataclass
+from typing import Tuple, Optional, Literal
 from functools import lru_cache
 from pathlib import Path
 import argparse
@@ -19,6 +20,8 @@ import random
 import math
 import numpy as np # Import numpy for potential future use, set random seed now not to forget to set it later
 
+from kernel import act_quant, weight_dequant, fp8_gemm
+
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch
 torch.empty(1, device="cuda", requires_grad=True).backward() # prevents a bug on some systems
@@ -29,6 +32,122 @@ from torch.nn.attention.flex_attention import BlockMask, flex_attention, create_
 #torch._inductor.config.max_autotune_gemm_backends = ["ATEN"]
 # -----------------------------------------------------------------------------
 # Custom operators: FP8 matmul by @YouJiacheng
+
+# mla - DeepSeek parameters
+q_lora_rank: int = 0
+kv_lora_rank: int = 512
+qk_nope_head_dim: int = 128
+qk_rope_head_dim: int = 64
+v_head_dim: int = 128
+attn_impl: Literal["naive", "absorb"] = "absorb"
+gemm_impl: Literal["bf16", "fp8"] = "bf16"
+block_size = 128
+rope_theta: float = 10000.0
+rope_factor: float = 40
+start_pos = 0
+beta_fast: int = 32
+beta_slow: int = 1
+mscale: float = 1.
+
+@dataclass
+class Hyperparameters:
+    """
+    default values are set to fit on a 2x GPUs w/ 8GB of VRAM each, but are not necessarily optimal
+    """
+    model_name = "ModdedGPT"
+    # data
+    train_files = "data/fineweb*_train_*.bin" # input .bin to train on
+    val_files = "data/fineweb*_val_*.bin" # input .bin to eval validation loss on
+    train_seq_len = 8*1024 # FlexAttention sequence length
+    val_seq_len = 16*1024 # FlexAttention sequence length for validation (should be able to fit more than train_seq_len)
+    # optimization loop
+    val_steps = 10 # number of steps to run validation for
+    train_steps = 20#_000 # number of training steps to run
+    grad_acc_steps = 1 # number of gradient accumulation steps per training step
+    cooldown_frac = 0.4 # fraction of training spent cooling down the learning rate
+    # architecture
+    tokenizer = "gpt4regex_v50256_n1000000000.pkl"# any .pkl file in tokenizers/
+    vocab_size = 50257 # should be the tokenizer's size plus any special tokens
+    # model size - parameters set for GPUs w/ 8GB VRAM
+    num_layers = 12  # number of reansformer blocks
+    num_heads = 6   # number of attention heads
+    model_dim = 384  # size of model embedding vectors
+    head_dim = None  # size of attention heads; if None, will default to model_dim // num_heads
+    mlp_ratio = 4  # MLP hidden dimension is model_dim * mlp_ratio
+    num_val_emb = 2 # number of value embeddings used at initial and final layers
+    # memory optimization 
+    use_fp8 = False # experimental; True on H100s (and newer?) should improve performance but seems to use more vram somehow
+    # evaluation and logging
+    val_loss_every = 100 # every how many steps to evaluate val loss? 0 for only at the end
+    save_model = False
+    # reproducibility
+    seed: int | None = None # Optional random seed for initialization control
+
+    def __post_init__(self):
+        # Validate and set derived parameters
+        assert self.train_seq_len % 128 == 0, f"train_seq_len must be multiple of 128, got {self.train_seq_len}"
+        assert self.val_seq_len % 128 == 0, f"val_seq_len must be multiple of 128, got {self.val_seq_len}"
+        assert self.grad_acc_steps >= 1, f"grad_acc steps must be int >= 1"
+        if self.head_dim is None:
+            self.head_dim = self.model_dim // self.num_heads
+        assert self.head_dim in [2 ** i for i in range(1, 10)], f"head_dim must be a power of 2, got {self.head_dim}"
+        assert self.mlp_ratio > 0, f"mlp_ratio must be positive, got {self.mlp_ratio}"
+        assert self.num_layers // 2 >= self.num_val_emb, \
+            f"num_layers // 2 (={self.num_layers // 2}) must be greater than or equal num_val_emb (={self.num_val_emb})"
+        assert self.num_layers % 2 == 0, f"Number of layers ({self.num_layers}) must be even for skip connections"
+
+    @classmethod
+    def from_args(cls):
+        """Create Hyperparameters from command-line arguments."""
+        parser = argparse.ArgumentParser(description="Train a GPT model with customizable hyperparameters")
+        
+        # Data arguments
+        parser.add_argument('--train_files', type=str, help='Pattern for training data files')
+        parser.add_argument('--val_files', type=str, help='Pattern for validation data files')
+        parser.add_argument('--train_seq_len', type=int, help='Training sequence length')
+        parser.add_argument('--val_seq_len', type=int, help='Validation sequence length')
+        
+        # Optimization arguments
+        parser.add_argument('--val_steps', type=int, help='Number of steps to run validation for')
+        parser.add_argument('--train_steps', type=int, help='Number of training iterations')
+        parser.add_argument('--grad_acc_steps', type=int, help='Number of gradient accumulation steps per training iteration')
+        parser.add_argument('--cooldown_frac', type=float, help='Fraction of training for learning rate cooldown')
+        
+        # Architecture arguments
+        parser.add_argument('--tokenizer', type=str, help='Tokenizer file name in tokenizers/ directory')
+        parser.add_argument('--vocab_size', type=int, help='Vocabulary size')
+        parser.add_argument('--num_layers', type=int, help='Number of transformer layers')
+        parser.add_argument('--num_heads', type=int, help='Number of attention heads')
+        parser.add_argument('--model_dim', type=int, help='Model embedding dimension')
+        parser.add_argument('--head_dim', type=int, help='Dimension per attention head')
+        parser.add_argument('--mlp_ratio', type=int, help='MLP hidden dim ratio')
+        parser.add_argument('--num_val_emb', type=int, help='Number of value embeddings used at initial and final layers')
+        
+        # Other options
+        parser.add_argument('--use_fp8', type=lambda x: (str(x).lower() == 'true'), default=None, 
+                            help='experimental; True on H100s (and newer?) should improve performance but seems to use more vram somehow')
+        parser.add_argument('--val_loss_every', type=int, help='Evaluate validation loss every N steps')
+        parser.add_argument('--save_model', type=lambda x: (str(x).lower() == 'true'), default=None, help='Save model checkpoints')
+        parser.add_argument('--model_name', type=str, help='Model name for logging')
+        parser.add_argument('--seed', type=int, help='Random seed for initialization control')
+        
+        args = parser.parse_args()
+        
+        # Create a base instance with defaults
+        instance = cls()
+        
+        # Update instance with command-line arguments that were provided
+        for key, value in vars(args).items():
+            if value is not None:  # Only update if argument was provided
+                setattr(instance, key, value)
+        
+        # Run post_init validations after applying CLI arguments
+        instance.__post_init__()
+        
+        return instance, args
+
+# Parse arguments and create Hyperparameters instance
+args, cli_args = Hyperparameters.from_args()
 
 @torch.library.custom_op("nanogpt::mm", mutates_args=())
 def mm_op(x: Tensor, w: Tensor, x_s: float, w_s: float, grad_s: float) -> tuple[Tensor, Tensor, Tensor]:
@@ -286,47 +405,371 @@ class Rotary(nn.Module):
         y2 = x1 * (-sin[..., :dim_half]) + x2 * cos[..., :dim_half]
         return torch.cat((y1, y2), 3).type_as(x_BTHD)
 
-class CausalSelfAttention(nn.Module):
+def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """
+    Applies a linear transformation to the incoming data: y = xA^T + b.
+    This function supports specialized implementations based on quantization
+    and tensor formats.
+
+    Args:
+        x (torch.Tensor): The input tensor.
+        weight (torch.Tensor): The weight tensor. It may be quantized and 
+            requires dequantization for certain cases.
+        bias (Optional[torch.Tensor]): The bias tensor to be added. Default is None.
+
+    Returns:
+        torch.Tensor: The result of the linear transformation, which may involve 
+        quantization-aware computations depending on the input parameters.
+
+    Notes:
+        - If `weight` is quantized (e.g., `element_size() == 1`), a dequantized version 
+          is used for computation.
+        - If `gemm_impl == "bf16"`, dequantization and a `bf16` GEMM operation are applied.
+        - For other cases, the function applies quantization to `x` and uses `fp8_gemm` for computation.
+    """
+    if weight.element_size() > 1:
+        return F.linear(x, weight, bias)
+    elif gemm_impl == "bf16":
+        weight = weight_dequant(weight, weight.scale)
+        return F.linear(x, weight, bias)
+    else:
+        x, scale = act_quant(x, block_size)
+        y = fp8_gemm(x, scale, weight, weight.scale)
+        if bias is not None:
+            y += bias
+        return y
+
+
+class Linear(nn.Module):
+    """
+    Custom linear layer with support for quantized weights and optional bias.
+
+    Args:
+        in_features (int): Number of input features.
+        out_features (int): Number of output features.
+        bias (bool): Whether to include a bias term. Defaults to False.
+        dtype (optional): Data type for the layer. Defaults to `torch.bfloat16`.
+    """
+    dtype = torch.bfloat16
+
+    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype = None):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype or Linear.dtype))
+        if self.weight.element_size() == 1:
+            scale_out_features = (out_features + block_size - 1) // block_size
+            scale_in_features = (in_features + block_size - 1) // block_size
+            self.weight.scale = self.scale = nn.Parameter(torch.empty(scale_out_features, scale_in_features, dtype=torch.float32))
+        else:
+            self.register_parameter("scale", None)
+        if bias:
+            self.bias = nn.Parameter(torch.empty(out_features))
+        else:
+            self.register_parameter("bias", None)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass for the custom linear layer.
+
+        Args:
+            x (torch.Tensor): Input tensor.
+
+        Returns:
+            torch.Tensor: Transformed tensor after linear computation.
+        """
+        return linear(x, self.weight, self.bias)
+
+
+class ColumnParallelLinear(Linear):
+    """
+    Linear layer with column parallelism, splitting output features across distributed processes.
+
+    Args:
+        in_features (int): Number of input features.
+        out_features (int): Total number of output features.
+        bias (bool): Whether to include a bias term. Defaults to False.
+        dtype (optional): Data type for the layer. Defaults to `torch.bfloat16`.
+    """
+    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype = None):
+        assert out_features % world_size == 0, f"Output features must be divisible by world size (world_size={world_size})"
+        self.part_out_features = out_features // world_size
+        super().__init__(in_features, self.part_out_features, bias, dtype)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass for column parallel linear layer.
+
+        Args:
+            x (torch.Tensor): Input tensor.
+
+        Returns:
+            torch.Tensor: Transformed tensor with column-parallel computation.
+        """
+        y = linear(x, self.weight, self.bias)
+        return y
+
+
+class RowParallelLinear(Linear):
+    """
+    Linear layer with row parallelism, splitting input features across distributed processes.
+
+    Args:
+        in_features (int): Total number of input features.
+        out_features (int): Number of output features.
+        bias (bool): Whether to include a bias term. Defaults to False.
+        dtype (optional): Data type for the layer. Defaults to `torch.bfloat16`.
+    """
+    def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype = None):
+        assert in_features % world_size == 0, f"Input features must be divisible by world size (world_size={world_size})"
+        self.part_in_features = in_features // world_size
+        super().__init__(self.part_in_features, out_features, bias, dtype)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass for row parallel linear layer.
+
+        Args:
+            x (torch.Tensor): Input tensor.
+
+        Returns:
+            torch.Tensor: Transformed tensor with row-parallel computation.
+        """
+        y = linear(x, self.weight)
+        if world_size > 1:
+            dist.all_reduce(y)
+        if self.bias is not None:
+            y += self.bias
+        return y
+
+
+class RMSNorm(nn.Module):
+    """
+    Root Mean Square Layer Normalization (RMSNorm).
+
+    Args:
+        dim (int): Dimension of the input tensor.
+        eps (float): Epsilon value for numerical stability. Defaults to 1e-6.
+    """
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.dim = dim
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x: torch.Tensor):
+        """
+        Forward pass for RMSNorm.
+
+        Args:
+            x (torch.Tensor): Input tensor.
+
+        Returns:
+            torch.Tensor: Normalized tensor with the same shape as input.
+        """
+        return F.rms_norm(x, (self.dim,), self.weight, self.eps)
+
+
+def precompute_freqs_cis() -> torch.Tensor:
+    """
+    Precomputes frequency-based complex exponential values for rotary positional embeddings.
+
+    Args:
+        args (ModelArgs): Model arguments containing positional embedding parameters.
+
+    Returns:
+        torch.Tensor: Precomputed complex exponential values for positional embeddings.
+    """
+    dim = qk_rope_head_dim
+    seqlen = max(args.train_seq_len, args.val_seq_len)
+    beta_fast = beta_fast
+    beta_slow = beta_slow
+    base = rope_theta
+    factor = rope_factor
+
+    def find_correction_dim(num_rotations, dim, base, max_seq_len):
+        """
+        Computes the correction dimension for a given number of rotations in the rotary positional embedding.
+
+        Args:
+            num_rotations (float): Number of rotations to compute the correction for.
+            dim (int): Dimensionality of the embedding space.
+            base (float): Base value for the exponential computation.
+            max_seq_len (int): Maximum sequence length.
+
+        Returns:
+            float: The correction dimension based on the input parameters.
+        """
+        return dim * math.log(max_seq_len / (num_rotations * 2 * math.pi)) / (2 * math.log(base))
+
+    def find_correction_range(low_rot, high_rot, dim, base, max_seq_len):
+        """
+        Computes the range of correction dimensions for rotary positional embeddings.
+
+        Args:
+            low_rot (float): Lower bound for the number of rotations.
+            high_rot (float): Upper bound for the number of rotations.
+            dim (int): Dimensionality of the embedding space.
+            base (float): Base value for the exponential computation.
+            max_seq_len (int): Maximum sequence length.
+
+        Returns:
+            Tuple[int, int]: The range of correction dimensions (low, high), clamped to valid indices.
+        """
+        low = math.floor(find_correction_dim(low_rot, dim, base, max_seq_len))
+        high = math.ceil(find_correction_dim(high_rot, dim, base, max_seq_len))
+        return max(low, 0), min(high, dim-1)
+
+    def linear_ramp_factor(min, max, dim):
+        """
+        Computes a linear ramp function used to smooth values between a minimum and maximum range.
+
+        Args:
+            min (float): Minimum value for the ramp function.
+            max (float): Maximum value for the ramp function.
+            dim (int): Dimensionality of the ramp tensor.
+
+        Returns:
+            torch.Tensor: A tensor of shape (dim,) with values linearly interpolated between 0 and 1,
+                clamped to the range [0, 1].
+        """
+        if min == max:
+            max += 0.001
+        linear_func = (torch.arange(dim, dtype=torch.float32) - min) / (max - min)
+        ramp_func = torch.clamp(linear_func, 0, 1)
+        return ramp_func
+
+    freqs = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
+    if seqlen > args.original_seq_len:
+        low, high = find_correction_range(beta_fast, beta_slow, dim, base, args.original_seq_len)
+        smooth = 1 - linear_ramp_factor(low, high, dim // 2)
+        freqs = freqs / factor * (1 - smooth) + freqs * smooth
+
+    t = torch.arange(seqlen)
+    freqs = torch.outer(t, freqs)
+    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
+    return freqs_cis
+
+
+def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
+    """
+    Applies rotary positional embeddings to the input tensor.
+
+    Args:
+        x (torch.Tensor): Input tensor with positional embeddings to be applied.
+        freqs_cis (torch.Tensor): Precomputed complex exponential values for positional embeddings.
+
+    Returns:
+        torch.Tensor: Tensor with rotary embeddings applied.
+    """
+    dtype = x.dtype
+    x = torch.view_as_complex(x.float().view(*x.shape[:-1], -1, 2))
+    freqs_cis = freqs_cis.view(1, x.size(1), 1, x.size(-1))
+    y = torch.view_as_real(x * freqs_cis).flatten(3)
+    return y.to(dtype)
+
+class MLA(nn.Module):
+    """
+    Multi-Head Latent Attention (MLA) Layer.
+
+    Attributes:
+        dim (int): Dimensionality of the input features.
+        n_heads (int): Number of attention heads.
+        n_local_heads (int): Number of local attention heads for distributed systems.
+        q_lora_rank (int): Rank for low-rank query projection.
+        kv_lora_rank (int): Rank for low-rank key/value projection.
+        qk_nope_head_dim (int): Dimensionality of non-positional query/key projections.
+        qk_rope_head_dim (int): Dimensionality of rotary-positional query/key projections.
+        qk_head_dim (int): Total dimensionality of query/key projections.
+        v_head_dim (int): Dimensionality of value projections.
+        softmax_scale (float): Scaling factor for softmax in attention computation.
+    """
     def __init__(self, dim: int, num_heads: int, max_seq_len: int, head_dim=None):
         super().__init__()
-        # Calculate head_dim based on model dimensions and num_heads
-        self.num_heads = num_heads
-        # If head_dim not specified, calculate it based on the model dimension
-        if head_dim is None:
-            head_dim = dim // num_heads
-        self.head_dim = head_dim
-        self.scale = 1 / math.sqrt(head_dim)
-        hdim = num_heads * head_dim
-        std = 0.5 * (dim ** -0.5)
-        bound = (3 ** 0.5) * std # improved init scale by @YouJiacheng
-        # merged QKV weights: suggested by many, implemented by @fernbear.bsky.social, and further improved by @YouJiacheng
-        # https://x.com/hi_tysam/status/1879699187107033311
-        self.qkv_w = nn.Parameter(torch.empty(3, hdim, dim).uniform_(-bound, bound))
-        self.lambdas = nn.Parameter(torch.tensor([0.5, 0.5]))
-        self.rotary = Rotary(head_dim, max_seq_len)
-        self.c_proj = CastedLinear(hdim, dim)
-        self.c_proj.weight.detach().zero_() # zero init suggested by @Grad62304977
+        self.dim = dim
+        self.n_heads = num_heads
+        self.n_local_heads = num_heads // world_size
+        self.q_lora_rank = q_lora_rank
+        self.kv_lora_rank = kv_lora_rank
+        self.qk_nope_head_dim = qk_nope_head_dim
+        self.qk_rope_head_dim = qk_rope_head_dim
+        self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+        self.v_head_dim = v_head_dim
 
-    def forward(self, x: Tensor, ve: Tensor | None, block_mask: BlockMask):
-        B, T = x.size(0), x.size(1) # batch size, sequence length
-        assert B == 1, "Must use batch size = 1 for FlexAttention"
-        q, k, v = F.linear(x, self.qkv_w.flatten(end_dim=1).type_as(x)).view(B, T, 3 * self.num_heads, self.head_dim).chunk(3, dim=-2)
-        q, k = norm(q), norm(k) # QK norm @Grad62304977
-        q, k = self.rotary(q), self.rotary(k)
-        if ve is not None:
-            v = self.lambdas[0] * v + self.lambdas[1] * ve.view_as(v) # @KoszarskyB & @Grad62304977
-        else: # skip mid-layers token value embeddings by @YouJiacheng
-            v = self.lambdas[0] * v
-        # scale the attention logits by given constant, instead of the default head_dim**-0.5, by @leloykun
-        # inspired by learnable scalars used by @brendanh0gan https://x.com/hi_tysam/status/1879693583898591283
-        y = flex_attention(
-            q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), 
-            block_mask=block_mask, 
-            scale=self.scale
-        ).transpose(1, 2)
-        y = y.contiguous().view(B, T, self.num_heads * self.head_dim) # re-assemble all head outputs side by side
-        y = self.c_proj(y)
-        return y
+        if self.q_lora_rank == 0:
+            self.wq = ColumnParallelLinear(self.dim, self.n_heads * self.qk_head_dim)
+        else:
+            self.wq_a = Linear(self.dim, self.q_lora_rank)
+            self.q_norm = RMSNorm(self.q_lora_rank)
+            self.wq_b = ColumnParallelLinear(self.q_lora_rank, self.n_heads * self.qk_head_dim)
+        self.wkv_a = Linear(self.dim, self.kv_lora_rank + self.qk_rope_head_dim)
+        self.kv_norm = RMSNorm(self.kv_lora_rank)
+        self.wkv_b = ColumnParallelLinear(self.kv_lora_rank, self.n_heads * (self.qk_nope_head_dim + self.v_head_dim))
+        self.wo = RowParallelLinear(self.n_heads * self.v_head_dim, self.dim)
+        self.softmax_scale = self.qk_head_dim ** -0.5
+        if args.max_seq_len > args.original_seq_len:
+            mscale = 0.1 * args.mscale * math.log(args.rope_factor) + 1.0
+            self.softmax_scale = self.softmax_scale * mscale * mscale
+
+        if attn_impl == "naive":
+            self.register_buffer("k_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_heads, self.qk_head_dim), persistent=False)
+            self.register_buffer("v_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_heads, self.v_head_dim), persistent=False)
+        else:
+            self.register_buffer("kv_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.kv_lora_rank), persistent=False)
+            self.register_buffer("pe_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.qk_rope_head_dim), persistent=False)
+
+    def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]):
+        """
+        Forward pass for the Multi-Head Latent Attention (MLA) Layer.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, seq_len, dim).
+            start_pos (int): Starting position in the sequence for caching.
+            freqs_cis (torch.Tensor): Precomputed complex exponential values for rotary embeddings.
+            mask (Optional[torch.Tensor]): Mask tensor to exclude certain positions from attention.
+
+        Returns:
+            torch.Tensor: Output tensor with the same shape as the input.
+        """
+        bsz, seqlen, _ = x.size()
+        end_pos = start_pos + seqlen
+        if self.q_lora_rank == 0:
+            q = self.wq(x)
+        else:
+            q = self.wq_b(self.q_norm(self.wq_a(x)))
+        q = q.view(bsz, seqlen, self.n_local_heads, self.qk_head_dim)
+        q_nope, q_pe = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+        q_pe = apply_rotary_emb(q_pe, freqs_cis)
+        kv = self.wkv_a(x)
+        kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        k_pe = apply_rotary_emb(k_pe.unsqueeze(2), freqs_cis)
+        if attn_impl == "naive":
+            q = torch.cat([q_nope, q_pe], dim=-1)
+            kv = self.wkv_b(self.kv_norm(kv))
+            kv = kv.view(bsz, seqlen, self.n_local_heads, self.qk_nope_head_dim + self.v_head_dim)
+            k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+            k = torch.cat([k_nope, k_pe.expand(-1, -1, self.n_local_heads, -1)], dim=-1)
+            self.k_cache[:bsz, start_pos:end_pos] = k
+            self.v_cache[:bsz, start_pos:end_pos] = v
+            scores = torch.einsum("bshd,bthd->bsht", q, self.k_cache[:bsz, :end_pos]) * self.softmax_scale
+        else:
+            wkv_b = self.wkv_b.weight if self.wkv_b.scale is None else weight_dequant(self.wkv_b.weight, self.wkv_b.scale, block_size) 
+            wkv_b = wkv_b.view(self.n_local_heads, -1, self.kv_lora_rank)
+            q_nope = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, :self.qk_nope_head_dim])
+            self.kv_cache[:bsz, start_pos:end_pos] = self.kv_norm(kv)
+            self.pe_cache[:bsz, start_pos:end_pos] = k_pe.squeeze(2)
+            scores = (torch.einsum("bshc,btc->bsht", q_nope, self.kv_cache[:bsz, :end_pos]) +
+                      torch.einsum("bshr,btr->bsht", q_pe, self.pe_cache[:bsz, :end_pos])) * self.softmax_scale
+        if mask is not None:
+            scores += mask.unsqueeze(1)
+        scores = scores.softmax(dim=-1, dtype=torch.float32).type_as(x)
+        if attn_impl == "naive":
+            x = torch.einsum("bsht,bthd->bshd", scores, self.v_cache[:bsz, :end_pos])
+        else:
+            x = torch.einsum("bsht,btc->bshc", scores, self.kv_cache[:bsz, :end_pos])
+            x = torch.einsum("bshc,hdc->bshd", x, wkv_b[:, -self.v_head_dim:])
+        x = self.wo(x.flatten(2))
+        return x
 
 class MLP(nn.Module):
     def __init__(self, dim: int, mlp_ratio: int = 4):
@@ -348,14 +791,17 @@ class Block(nn.Module):
         # skip attention of blocks.7 (the 8th layer) by @YouJiacheng
         # Adjusted for smaller models - only skip if we have enough layers
         skip_attn = (layer_idx == 7) and (dim > 512)  # Only skip in larger models
-        self.attn = CausalSelfAttention(dim, num_heads, max_seq_len) if not skip_attn else None
+        self.attn = MLA(dim, num_heads, max_seq_len) if not skip_attn else None
         self.mlp = MLP(dim, mlp_ratio)
         self.lambdas = nn.Parameter(torch.tensor([1., 0.]))
 
-    def forward(self, x: Tensor, ve: Tensor | None, x0: Tensor, block_mask: BlockMask):
+    def forward(self, x: Tensor, ve: Tensor | None, x0: Tensor, attention_mask: Optional[torch.Tensor], freqs_cis: torch.Tensor):
         x = self.lambdas[0] * x + self.lambdas[1] * x0
         if self.attn is not None:
-            x = x + self.attn(norm(x), ve, block_mask)
+            # The following line was for flex_attention and is not used with MLA
+            # x = x + self.attn(norm(x), block_mask) 
+            # Pass the `attention_mask` and global `start_pos` to MLA
+            x = x + self.attn(norm(x), start_pos, freqs_cis, attention_mask) # start_pos here is the global one
         x = x + self.mlp(norm(x))
         return x
 
@@ -384,23 +830,32 @@ class GPT(nn.Module):
         self.lm_head.weight.detach().zero_() # @Grad62304977
         # Add learnable skip connection weights for decoder layers
         self.skip_weights = nn.Parameter(torch.ones(num_layers//2))
+        self.register_buffer("freqs_cis", precompute_freqs_cis(), persistent=False)
 
     def forward(self, input_seq: Tensor, target_seq: Tensor = None):
         assert input_seq.ndim == 1 # shape (B*N)
+        seq_len = input_seq.size(0) # Get sequence length from input_seq
+
+        freqs_cis = self.freqs_cis[start_pos:start_pos + seq_len] # Adjusted to use dynamic seq_len
 
         # value emeddings provide extra info about a token at the first & final few layers
         ve = [value_embed(input_seq) for value_embed in self.value_embeds] # each (B*N, D)
         ve = [ve[i] for i in range(len(ve))] + [None] * (len(self.blocks) - len(ve)*2) + [ve[i] for i in range(len(ve))]
         assert len(ve) == len(self.blocks)
 
-        # creating flex-attentio mask
-        docs = (input_seq == 50256).cumsum(0)
-        def doc_causal(b, h, q_idx, kv_idx):
-            causal_mask = q_idx >= kv_idx
-            document_mask = docs[q_idx] == docs[kv_idx]
-            return causal_mask & document_mask
-        # Because the sparsity pattern is independent of batch and heads, we'll set them to None (which broadcasts them) 
-        block_mask = create_block_mask(doc_causal, B=None, H=None, Q_LEN=len(input_seq), KV_LEN=len(input_seq))
+        # Generate causal mask similar to test.py
+        attention_mask = None
+        if seq_len > 1: # seq_len is derived from input_seq.size(0)
+            attention_mask = torch.full((seq_len, seq_len), float("-inf"), device=input_seq.device).triu_(1)
+        
+        # The following BlockMask logic for flex_attention is no longer needed with MLA using a tensor mask.
+        # docs = (input_seq == 50256).cumsum(0)
+        # def doc_causal(b, h, q_idx, kv_idx):
+        #     causal_mask = q_idx >= kv_idx
+        #     document_mask = docs[q_idx] == docs[kv_idx]
+        #     return causal_mask & document_mask
+        # # Because the sparsity pattern is independent of batch and heads, we'll set them to None (which broadcasts them) 
+        # block_mask = create_block_mask(doc_causal, B=None, H=None, Q_LEN=len(input_seq), KV_LEN=len(input_seq))
 
         x = x0 = norm(self.embed(input_seq)[None]) # use of norm here by @Grad62304977
 
@@ -410,7 +865,8 @@ class GPT(nn.Module):
         for i in range(len(self.blocks)):
             if i >= n:
                 x = x + self.skip_weights[i - n] * skip_connections.pop()
-            x = self.blocks[i](x, ve[i], x0, block_mask)
+            # Pass the new `attention_mask` tensor to the block
+            x = self.blocks[i](x, ve[i], x0, attention_mask, freqs_cis)
             if i < n:
                 skip_connections.append(x)
 
@@ -531,105 +987,7 @@ def distributed_data_generator(filename_pattern: str, batch_size: int, rank: int
 # -----------------------------------------------------------------------------
 # int main
 
-@dataclass
-class Hyperparameters:
-    """
-    default values are set to fit on a 2x GPUs w/ 8GB of VRAM each, but are not necessarily optimal
-    """
-    model_name = "ModdedGPT"
-    # data
-    train_files = "data/fineweb*_train_*.bin" # input .bin to train on
-    val_files = "data/fineweb*_val_*.bin" # input .bin to eval validation loss on
-    train_seq_len = 8*1024 # FlexAttention sequence length
-    val_seq_len = 16*1024 # FlexAttention sequence length for validation (should be able to fit more than train_seq_len)
-    # optimization loop
-    val_steps = 10 # number of steps to run validation for
-    train_steps = 20#_000 # number of training steps to run
-    grad_acc_steps = 1 # number of gradient accumulation steps per training step
-    cooldown_frac = 0.4 # fraction of training spent cooling down the learning rate
-    # architecture
-    tokenizer = "gpt4regex_v50256_n1000000000.pkl"# any .pkl file in tokenizers/
-    vocab_size = 50257 # should be the tokenizer's size plus any special tokens
-    # model size - parameters set for GPUs w/ 8GB VRAM
-    num_layers = 12  # number of reansformer blocks
-    num_heads = 6   # number of attention heads
-    model_dim = 384  # size of model embedding vectors
-    head_dim = None  # size of attention heads; if None, will default to model_dim // num_heads
-    mlp_ratio = 4  # MLP hidden dimension is model_dim * mlp_ratio
-    num_val_emb = 2 # number of value embeddings used at initial and final layers
-    # memory optimization 
-    use_fp8 = False # experimental; True on H100s (and newer?) should improve performance but seems to use more vram somehow
-    # evaluation and logging
-    val_loss_every = 100 # every how many steps to evaluate val loss? 0 for only at the end
-    save_model = False
-    # reproducibility
-    seed: int | None = None # Optional random seed for initialization control
 
-    def __post_init__(self):
-        # Validate and set derived parameters
-        assert self.train_seq_len % 128 == 0, f"train_seq_len must be multiple of 128, got {self.train_seq_len}"
-        assert self.val_seq_len % 128 == 0, f"val_seq_len must be multiple of 128, got {self.val_seq_len}"
-        assert self.grad_acc_steps >= 1, f"grad_acc steps must be int >= 1"
-        if self.head_dim is None:
-            self.head_dim = self.model_dim // self.num_heads
-        assert self.head_dim in [2 ** i for i in range(1, 10)], f"head_dim must be a power of 2, got {self.head_dim}"
-        assert self.mlp_ratio > 0, f"mlp_ratio must be positive, got {self.mlp_ratio}"
-        assert self.num_layers // 2 >= self.num_val_emb, \
-            f"num_layers // 2 (={self.num_layers // 2}) must be greater than or equal num_val_emb (={self.num_val_emb})"
-        assert self.num_layers % 2 == 0, f"Number of layers ({self.num_layers}) must be even for skip connections"
-
-    @classmethod
-    def from_args(cls):
-        """Create Hyperparameters from command-line arguments."""
-        parser = argparse.ArgumentParser(description="Train a GPT model with customizable hyperparameters")
-        
-        # Data arguments
-        parser.add_argument('--train_files', type=str, help='Pattern for training data files')
-        parser.add_argument('--val_files', type=str, help='Pattern for validation data files')
-        parser.add_argument('--train_seq_len', type=int, help='Training sequence length')
-        parser.add_argument('--val_seq_len', type=int, help='Validation sequence length')
-        
-        # Optimization arguments
-        parser.add_argument('--val_steps', type=int, help='Number of steps to run validation for')
-        parser.add_argument('--train_steps', type=int, help='Number of training iterations')
-        parser.add_argument('--grad_acc_steps', type=int, help='Number of gradient accumulation steps per training iteration')
-        parser.add_argument('--cooldown_frac', type=float, help='Fraction of training for learning rate cooldown')
-        
-        # Architecture arguments
-        parser.add_argument('--tokenizer', type=str, help='Tokenizer file name in tokenizers/ directory')
-        parser.add_argument('--vocab_size', type=int, help='Vocabulary size')
-        parser.add_argument('--num_layers', type=int, help='Number of transformer layers')
-        parser.add_argument('--num_heads', type=int, help='Number of attention heads')
-        parser.add_argument('--model_dim', type=int, help='Model embedding dimension')
-        parser.add_argument('--head_dim', type=int, help='Dimension per attention head')
-        parser.add_argument('--mlp_ratio', type=int, help='MLP hidden dim ratio')
-        parser.add_argument('--num_val_emb', type=int, help='Number of value embeddings used at initial and final layers')
-        
-        # Other options
-        parser.add_argument('--use_fp8', type=lambda x: (str(x).lower() == 'true'), default=None, 
-                            help='experimental; True on H100s (and newer?) should improve performance but seems to use more vram somehow')
-        parser.add_argument('--val_loss_every', type=int, help='Evaluate validation loss every N steps')
-        parser.add_argument('--save_model', type=lambda x: (str(x).lower() == 'true'), default=None, help='Save model checkpoints')
-        parser.add_argument('--model_name', type=str, help='Model name for logging')
-        parser.add_argument('--seed', type=int, help='Random seed for initialization control')
-        
-        args = parser.parse_args()
-        
-        # Create a base instance with defaults
-        instance = cls()
-        
-        # Update instance with command-line arguments that were provided
-        for key, value in vars(args).items():
-            if value is not None:  # Only update if argument was provided
-                setattr(instance, key, value)
-        
-        # Run post_init validations after applying CLI arguments
-        instance.__post_init__()
-        
-        return instance, args
-
-# Parse arguments and create Hyperparameters instance
-args, cli_args = Hyperparameters.from_args()
 
 # Check if environment variables are set by torchrun, otherwise default to single GPU
 if "RANK" in os.environ and "WORLD_SIZE" in os.environ and "LOCAL_RANK" in os.environ:
