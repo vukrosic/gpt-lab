@@ -680,7 +680,7 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
     y_complex = x_complex * freqs_cis
     
     # View as real and flatten the last two dimensions
-    y = torch.view_as_real(y_complex).flatten(3)
+    y = torch.view_as_real(y_complex.contiguous()).flatten(3) # Added .contiguous()
     
     return y.to(dtype)
 
