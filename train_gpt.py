@@ -665,9 +665,23 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
         torch.Tensor: Tensor with rotary embeddings applied.
     """
     dtype = x.dtype
-    x = torch.view_as_complex(x.float().view(*x.shape[:-1], -1, 2))
-    freqs_cis = freqs_cis.view(1, x.size(1), 1, x.size(-1))
-    y = torch.view_as_real(x * freqs_cis).flatten(3)
+    # x = torch.view_as_complex(x.float().view(*x.shape[:-1], -1, 2))
+    # freqs_cis = freqs_cis.view(1, x.size(1), 1, x.size(-1))
+    # y = torch.view_as_real(x * freqs_cis).flatten(3)
+    # return y.to(dtype)
+    # Ensure the tensor is float32 and contiguous for view_as_complex
+    x_float = x.float()
+    x_reshaped = x_float.view(*x_float.shape[:-1], -1, 2)
+    x_complex = torch.view_as_complex(x_reshaped.contiguous()) # Added .contiguous()
+    
+    freqs_cis = freqs_cis.view(1, x_complex.size(1), 1, x_complex.size(-1)) # Match freqs_cis shape to x_complex
+    
+    # Perform the complex multiplication
+    y_complex = x_complex * freqs_cis
+    
+    # View as real and flatten the last two dimensions
+    y = torch.view_as_real(y_complex).flatten(3)
+    
     return y.to(dtype)
 
 class MLA(nn.Module):
@@ -713,13 +727,14 @@ class MLA(nn.Module):
             # Use global mscale and rope_factor for this calculation
             mscale_factor = 0.1 * mscale * math.log(rope_factor) + 1.0
             self.softmax_scale = self.softmax_scale * mscale_factor * mscale_factor
+        buffer_dtype = self.wkv_a.weight.dtype
 
         if attn_impl == "naive":
-            self.register_buffer("k_cache", torch.zeros(args.max_batch_size, max_seq_len, self.n_local_heads, self.qk_head_dim), persistent=False)
-            self.register_buffer("v_cache", torch.zeros(args.max_batch_size, max_seq_len, self.n_local_heads, self.v_head_dim), persistent=False)
+            self.register_buffer("k_cache", torch.zeros(args.max_batch_size, max_seq_len, self.n_local_heads, self.qk_head_dim,  dtype=buffer_dtype), persistent=False)
+            self.register_buffer("v_cache", torch.zeros(args.max_batch_size, max_seq_len, self.n_local_heads, self.v_head_dim,  dtype=buffer_dtype), persistent=False)
         else:
-            self.register_buffer("kv_cache", torch.zeros(args.max_batch_size, max_seq_len, self.kv_lora_rank), persistent=False)
-            self.register_buffer("pe_cache", torch.zeros(args.max_batch_size, max_seq_len, self.qk_rope_head_dim), persistent=False)
+            self.register_buffer("kv_cache", torch.zeros(args.max_batch_size, max_seq_len, self.kv_lora_rank, dtype=buffer_dtype), persistent=False)
+            self.register_buffer("pe_cache", torch.zeros(args.max_batch_size, max_seq_len, self.qk_rope_head_dim, dtype=buffer_dtype), persistent=False)
 
     def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]):
         """
