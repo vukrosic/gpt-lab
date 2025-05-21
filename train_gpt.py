@@ -586,8 +586,6 @@ def precompute_freqs_cis() -> torch.Tensor:
     """
     dim = qk_rope_head_dim
     seqlen = max(args.train_seq_len, args.val_seq_len)
-    beta_fast = beta_fast
-    beta_slow = beta_slow
     base = rope_theta
     factor = rope_factor
 
