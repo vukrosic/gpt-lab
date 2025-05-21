@@ -60,6 +60,7 @@ class Hyperparameters:
     val_files = "data/fineweb*_val_*.bin" # input .bin to eval validation loss on
     train_seq_len = 8*1024 # FlexAttention sequence length
     val_seq_len = 16*1024 # FlexAttention sequence length for validation (should be able to fit more than train_seq_len)
+    original_seq_len: int = 4096 # Original sequence length for scaling calculations
     # optimization loop
     val_steps = 10 # number of steps to run validation for
     train_steps = 20#_000 # number of training steps to run
@@ -87,6 +88,7 @@ class Hyperparameters:
         # Validate and set derived parameters
         assert self.train_seq_len % 128 == 0, f"train_seq_len must be multiple of 128, got {self.train_seq_len}"
         assert self.val_seq_len % 128 == 0, f"val_seq_len must be multiple of 128, got {self.val_seq_len}"
+        assert self.original_seq_len > 0, f"original_seq_len must be positive, got {self.original_seq_len}"
         assert self.grad_acc_steps >= 1, f"grad_acc steps must be int >= 1"
         if self.head_dim is None:
             self.head_dim = self.model_dim // self.num_heads
@@ -106,6 +108,7 @@ class Hyperparameters:
         parser.add_argument('--val_files', type=str, help='Pattern for validation data files')
         parser.add_argument('--train_seq_len', type=int, help='Training sequence length')
         parser.add_argument('--val_seq_len', type=int, help='Validation sequence length')
+        parser.add_argument('--original_seq_len', type=int, help='Original sequence length for RoPE/softmax scaling')
         
         # Optimization arguments
         parser.add_argument('--val_steps', type=int, help='Number of steps to run validation for')
@@ -707,9 +710,10 @@ class MLA(nn.Module):
         self.wkv_b = ColumnParallelLinear(self.kv_lora_rank, self.n_heads * (self.qk_nope_head_dim + self.v_head_dim))
         self.wo = RowParallelLinear(self.n_heads * self.v_head_dim, self.dim)
         self.softmax_scale = self.qk_head_dim ** -0.5
-        if args.max_seq_len > args.original_seq_len:
-            mscale = 0.1 * args.mscale * math.log(args.rope_factor) + 1.0
-            self.softmax_scale = self.softmax_scale * mscale * mscale
+        if max_seq_len > args.original_seq_len: # Use local max_seq_len and args.original_seq_len
+            # Use global mscale and rope_factor for this calculation
+            mscale_factor = 0.1 * mscale * math.log(rope_factor) + 1.0
+            self.softmax_scale = self.softmax_scale * mscale_factor * mscale_factor
 
         if attn_impl == "naive":
             self.register_buffer("k_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_heads, self.qk_head_dim), persistent=False)
