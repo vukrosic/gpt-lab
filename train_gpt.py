@@ -60,7 +60,6 @@ class Hyperparameters:
     val_files = "data/fineweb*_val_*.bin" # input .bin to eval validation loss on
     train_seq_len = 8*1024 # FlexAttention sequence length
     val_seq_len = 16*1024 # FlexAttention sequence length for validation (should be able to fit more than train_seq_len)
-    original_seq_len: int = 4096 # Original sequence length for scaling calculations
     # optimization loop
     val_steps = 10 # number of steps to run validation for
     train_steps = 20#_000 # number of training steps to run
@@ -76,6 +75,7 @@ class Hyperparameters:
     head_dim = None  # size of attention heads; if None, will default to model_dim // num_heads
     mlp_ratio = 4  # MLP hidden dimension is model_dim * mlp_ratio
     num_val_emb = 2 # number of value embeddings used at initial and final layers
+    max_batch_size: int = 4 # Maximum batch size for inference cache
     # memory optimization 
     use_fp8 = False # experimental; True on H100s (and newer?) should improve performance but seems to use more vram somehow
     # evaluation and logging
@@ -88,7 +88,7 @@ class Hyperparameters:
         # Validate and set derived parameters
         assert self.train_seq_len % 128 == 0, f"train_seq_len must be multiple of 128, got {self.train_seq_len}"
         assert self.val_seq_len % 128 == 0, f"val_seq_len must be multiple of 128, got {self.val_seq_len}"
-        assert self.original_seq_len > 0, f"original_seq_len must be positive, got {self.original_seq_len}"
+        # assert self.original_seq_len > 0, f"original_seq_len must be positive, got {self.original_seq_len}" # Removed
         assert self.grad_acc_steps >= 1, f"grad_acc steps must be int >= 1"
         if self.head_dim is None:
             self.head_dim = self.model_dim // self.num_heads
@@ -108,7 +108,7 @@ class Hyperparameters:
         parser.add_argument('--val_files', type=str, help='Pattern for validation data files')
         parser.add_argument('--train_seq_len', type=int, help='Training sequence length')
         parser.add_argument('--val_seq_len', type=int, help='Validation sequence length')
-        parser.add_argument('--original_seq_len', type=int, help='Original sequence length for RoPE/softmax scaling')
+        # parser.add_argument('--original_seq_len', type=int, help='Original sequence length for RoPE/softmax scaling') # Removed
         
         # Optimization arguments
         parser.add_argument('--val_steps', type=int, help='Number of steps to run validation for')
@@ -125,6 +125,7 @@ class Hyperparameters:
         parser.add_argument('--head_dim', type=int, help='Dimension per attention head')
         parser.add_argument('--mlp_ratio', type=int, help='MLP hidden dim ratio')
         parser.add_argument('--num_val_emb', type=int, help='Number of value embeddings used at initial and final layers')
+        parser.add_argument('--max_batch_size', type=int, help='Maximum batch size for inference cache')
         
         # Other options
         parser.add_argument('--use_fp8', type=lambda x: (str(x).lower() == 'true'), default=None, 
@@ -643,8 +644,8 @@ def precompute_freqs_cis() -> torch.Tensor:
         return ramp_func
 
     freqs = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
-    if seqlen > args.original_seq_len:
-        low, high = find_correction_range(beta_fast, beta_slow, dim, base, args.original_seq_len)
+    if seqlen > args.train_seq_len: # Changed from args.original_seq_len
+        low, high = find_correction_range(beta_fast, beta_slow, dim, base, args.train_seq_len) # Changed from args.original_seq_len
         smooth = 1 - linear_ramp_factor(low, high, dim // 2)
         freqs = freqs / factor * (1 - smooth) + freqs * smooth
 
@@ -710,17 +711,17 @@ class MLA(nn.Module):
         self.wkv_b = ColumnParallelLinear(self.kv_lora_rank, self.n_heads * (self.qk_nope_head_dim + self.v_head_dim))
         self.wo = RowParallelLinear(self.n_heads * self.v_head_dim, self.dim)
         self.softmax_scale = self.qk_head_dim ** -0.5
-        if max_seq_len > args.original_seq_len: # Use local max_seq_len and args.original_seq_len
+        if max_seq_len > args.train_seq_len: # Use local max_seq_len and args.train_seq_len. Changed from args.original_seq_len
             # Use global mscale and rope_factor for this calculation
             mscale_factor = 0.1 * mscale * math.log(rope_factor) + 1.0
             self.softmax_scale = self.softmax_scale * mscale_factor * mscale_factor
 
         if attn_impl == "naive":
-            self.register_buffer("k_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_heads, self.qk_head_dim), persistent=False)
-            self.register_buffer("v_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.n_local_heads, self.v_head_dim), persistent=False)
+            self.register_buffer("k_cache", torch.zeros(args.max_batch_size, max_seq_len, self.n_local_heads, self.qk_head_dim), persistent=False)
+            self.register_buffer("v_cache", torch.zeros(args.max_batch_size, max_seq_len, self.n_local_heads, self.v_head_dim), persistent=False)
         else:
-            self.register_buffer("kv_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.kv_lora_rank), persistent=False)
-            self.register_buffer("pe_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.qk_rope_head_dim), persistent=False)
+            self.register_buffer("kv_cache", torch.zeros(args.max_batch_size, max_seq_len, self.kv_lora_rank), persistent=False)
+            self.register_buffer("pe_cache", torch.zeros(args.max_batch_size, max_seq_len, self.qk_rope_head_dim), persistent=False)
 
     def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]):
         """
