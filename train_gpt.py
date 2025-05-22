@@ -386,28 +386,28 @@ class CastedLinear(nn.Linear):
         else:
             return F.linear(x, self.weight.type_as(x))
 
-class Rotary(nn.Module):
-    def __init__(self, dim: int, max_seq_len: int):
-        super().__init__()
-        # half-truncate RoPE by @YouJiacheng (w/ base freq tuning)
-        # Ensure we don't exceed the dimension size
-        dim_quarter = max(1, dim // 4)
-        angular_freq = (1 / 1024) ** torch.linspace(0, 1, steps=dim_quarter, dtype=torch.float32)
-        angular_freq = torch.cat([angular_freq, angular_freq.new_zeros(dim_quarter)])
-        t = torch.arange(max_seq_len, dtype=torch.float32)
-        theta = torch.einsum("i,j -> ij", t, angular_freq) # outer product
-        self.cos = nn.Buffer(theta.cos(), persistent=False)
-        self.sin = nn.Buffer(theta.sin(), persistent=False)
+# class Rotary(nn.Module):
+#     def __init__(self, dim: int, max_seq_len: int):
+#         super().__init__()
+#         # half-truncate RoPE by @YouJiacheng (w/ base freq tuning)
+#         # Ensure we don't exceed the dimension size
+#         dim_quarter = max(1, dim // 4)
+#         angular_freq = (1 / 1024) ** torch.linspace(0, 1, steps=dim_quarter, dtype=torch.float32)
+#         angular_freq = torch.cat([angular_freq, angular_freq.new_zeros(dim_quarter)])
+#         t = torch.arange(max_seq_len, dtype=torch.float32)
+#         theta = torch.einsum("i,j -> ij", t, angular_freq) # outer product
+#         self.cos = nn.Buffer(theta.cos(), persistent=False)
+#         self.sin = nn.Buffer(theta.sin(), persistent=False)
 
-    def forward(self, x_BTHD: Tensor):
-        assert self.cos.size(0) >= x_BTHD.size(-3)
-        cos, sin = self.cos[None, :x_BTHD.size(-3), None, :], self.sin[None, :x_BTHD.size(-3), None, :]
-        # Handle case where the number of dimensions is smaller
-        dim_half = x_BTHD.size(-1) // 2
-        x1, x2 = x_BTHD.to(dtype=torch.float32).chunk(2, dim=-1)
-        y1 = x1 * cos[..., :dim_half] + x2 * sin[..., :dim_half]
-        y2 = x1 * (-sin[..., :dim_half]) + x2 * cos[..., :dim_half]
-        return torch.cat((y1, y2), 3).type_as(x_BTHD)
+#     def forward(self, x_BTHD: Tensor):
+#         assert self.cos.size(0) >= x_BTHD.size(-3)
+#         cos, sin = self.cos[None, :x_BTHD.size(-3), None, :], self.sin[None, :x_BTHD.size(-3), None, :]
+#         # Handle case where the number of dimensions is smaller
+#         dim_half = x_BTHD.size(-1) // 2
+#         x1, x2 = x_BTHD.to(dtype=torch.float32).chunk(2, dim=-1)
+#         y1 = x1 * cos[..., :dim_half] + x2 * sin[..., :dim_half]
+#         y2 = x1 * (-sin[..., :dim_half]) + x2 * cos[..., :dim_half]
+#         return torch.cat((y1, y2), 3).type_as(x_BTHD)
 
 def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     """
@@ -656,31 +656,21 @@ def precompute_freqs_cis() -> torch.Tensor:
 def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
     """
     Applies rotary positional embeddings to the input tensor.
-
-    Args:
-        x (torch.Tensor): Input tensor with positional embeddings to be applied.
-        freqs_cis (torch.Tensor): Precomputed complex exponential values for positional embeddings.
-
-    Returns:
-        torch.Tensor: Tensor with rotary embeddings applied.
     """
     dtype = x.dtype
-    # x = torch.view_as_complex(x.float().view(*x.shape[:-1], -1, 2))
-    # freqs_cis = freqs_cis.view(1, x.size(1), 1, x.size(-1))
-    # y = torch.view_as_real(x * freqs_cis).flatten(3)
-    # return y.to(dtype)
-    # Ensure the tensor is float32 and contiguous for view_as_complex
-    x_float = x.float()
-    x_reshaped = x_float.view(*x_float.shape[:-1], -1, 2)
-    x_complex = torch.view_as_complex(x_reshaped.contiguous()) # Added .contiguous()
+    # Ensure the tensor is contiguous before casting to complex
+    x_float = x.float().contiguous()
+    x_reshaped = x_float.reshape(*x_float.shape[:-1], -1, 2) # Changed from view to reshape
+    x_complex = torch.view_as_complex(x_reshaped)
     
-    freqs_cis = freqs_cis.view(1, x_complex.size(1), 1, x_complex.size(-1)) # Match freqs_cis shape to x_complex
+    # Resize freqs_cis to match x_complex shape for broadcasting
+    freqs_cis = freqs_cis.view(1, x_complex.size(1), 1, x_complex.size(-1))
     
     # Perform the complex multiplication
     y_complex = x_complex * freqs_cis
     
-    # View as real and flatten the last two dimensions
-    y = torch.view_as_real(y_complex.contiguous()).flatten(3) # Added .contiguous()
+    # Convert back to real and ensure it's contiguous
+    y = torch.view_as_real(y_complex.contiguous()).flatten(3)
     
     return y.to(dtype)
 
