@@ -656,37 +656,36 @@ def precompute_freqs_cis() -> torch.Tensor:
 def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
     """
     Applies rotary positional embeddings to the input tensor.
+    Args:
+        x (torch.Tensor): Input tensor with positional embeddings to be applied.
+        freqs_cis (torch.Tensor): Precomputed complex exponential values for positional embeddings.
+    Returns:
+        torch.Tensor: Tensor with rotary embeddings applied.
     """
     dtype = x.dtype
-    # Ensure the tensor is contiguous before casting to complex
-    x_float = x.float().contiguous()
+    x = x.float()
     
-    x_reshaped = x_float.reshape(*x_float.shape[:-1], -1, 2).contiguous()
+    # Reshape x to separate real and imaginary parts
+    # x.shape[:-1] + (-1, 2) means we're treating the last dimension as pairs of (real, imag)
+    x_reshaped = x.view(*x.shape[:-1], -1, 2)
+    x_real = x_reshaped[..., 0]  # Real parts
+    x_imag = x_reshaped[..., 1]  # Imaginary parts
     
-    # Check strides before calling view_as_complex
-    if x_reshaped.stride(-1) != 1:
-        print(f"ERROR: Innermost dimension stride is {x_reshaped.stride(-1)}, but must be 1 for view_as_complex.")
-    for i in range(x_reshaped.ndim - 1):
-        if x_reshaped.stride(i) % 2 != 0:
-            print(f"ERROR: Stride of dimension {i} ({x_reshaped.stride(i)}) is not divisible by 2, required for view_as_complex.")
-            break # No need to check further if one fails
-            
-    x_complex = torch.view_as_complex(x_reshaped)
+    # Reshape freqs_cis to match x dimensions
+    freqs_cis = freqs_cis.view(1, x_real.size(1), 1, x_real.size(-1))
+    freqs_real = freqs_cis.real
+    freqs_imag = freqs_cis.imag
     
-    # Resize freqs_cis to match x_complex shape for broadcasting
-    freqs_cis = freqs_cis.view(1, x_complex.size(1), 1, x_complex.size(-1))
+    # Manual complex multiplication: (a + bi) * (c + di) = (ac - bd) + (ad + bc)i
+    # where x = a + bi and freqs_cis = c + di
+    result_real = x_real * freqs_real - x_imag * freqs_imag
+    result_imag = x_real * freqs_imag + x_imag * freqs_real
     
-    # Perform the complex multiplication
-    y_complex = x_complex * freqs_cis
+    # Stack real and imaginary parts back together
+    result = torch.stack([result_real, result_imag], dim=-1)
     
-    # Convert back to real and ensure it's contiguous
-    # Original line: y = torch.view_as_real(y_complex.contiguous()).flatten(3)
-    
-    # Granular breakdown:
-    y_complex_made_contiguous = y_complex.contiguous()
-    y_as_real_tensor = torch.view_as_real(y_complex_made_contiguous)
-    y_flattened = y_as_real_tensor.flatten(3)
-    y = y_flattened # The .to(dtype) will be handled by the return statement
+    # Flatten the last two dimensions to match original output format
+    y = result.flatten(-2)
     
     return y.to(dtype)
 
