@@ -661,7 +661,7 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
     # Ensure the tensor is contiguous before casting to complex
     x_float = x.float().contiguous()
     
-    x_reshaped = x_float.reshape(*x_float.shape[:-1], -1, 2) # Changed from view to reshape
+    x_reshaped = x_float.reshape(*x_float.shape[:-1], -1, 2).contiguous()
     
     # Check strides before calling view_as_complex
     if x_reshaped.stride(-1) != 1:
