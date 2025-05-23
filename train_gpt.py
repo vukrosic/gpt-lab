@@ -680,7 +680,13 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
     y_complex = x_complex * freqs_cis
     
     # Convert back to real and ensure it's contiguous
-    y = torch.view_as_real(y_complex.contiguous()).flatten(3)
+    # Original line: y = torch.view_as_real(y_complex.contiguous()).flatten(3)
+    
+    # Granular breakdown:
+    y_complex_made_contiguous = y_complex.contiguous()
+    y_as_real_tensor = torch.view_as_real(y_complex_made_contiguous)
+    y_flattened = y_as_real_tensor.flatten(3)
+    y = y_flattened # The .to(dtype) will be handled by the return statement
     
     return y.to(dtype)
 
