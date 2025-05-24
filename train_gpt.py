@@ -28,7 +28,6 @@ torch.empty(1, device="cuda", requires_grad=True).backward() # prevents a bug on
 from torch import Tensor, nn
 import torch.nn.functional as F
 import torch.distributed as dist
-from torch.nn.attention.flex_attention import BlockMask, flex_attention, create_block_mask
 #torch._inductor.config.max_autotune_gemm_backends = ["ATEN"]
 # -----------------------------------------------------------------------------
 # Custom operators: FP8 matmul by @YouJiacheng
@@ -1208,10 +1207,10 @@ def get_lr(step: int):
         return w * 1.0 + (1 - w) * 0.1
 
 # Use a more memory-efficient compilation option
-if args.use_fp8:
-    model: nn.Module = torch.compile(model, dynamic=False)
-else:
-    model: nn.Module = torch.compile(model, dynamic=False, mode="reduce-overhead")
+# if args.use_fp8:
+#     model: nn.Module = torch.compile(model, dynamic=False)
+# else:
+#     model: nn.Module = torch.compile(model, dynamic=False, mode="reduce-overhead")
 
 # Add fallback mode to handle compilation errors
 import torch._dynamo
