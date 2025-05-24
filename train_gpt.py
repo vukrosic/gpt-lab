@@ -779,9 +779,11 @@ class MLA(nn.Module):
             wkv_b = self.wkv_b.weight if self.wkv_b.scale is None else weight_dequant(self.wkv_b.weight, self.wkv_b.scale, block_size) 
             wkv_b = wkv_b.view(self.n_local_heads, -1, self.kv_lora_rank)
             q_nope = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, :self.qk_nope_head_dim])
+            q_nope = q_nope.to(q_nope.dtype)  # Cast back to original dtype (bfloat16) if needed
             
             # Compute current K/V values into local, gradient-tracked tensors
             current_kv_for_q_nope = self.kv_norm(kv)
+            current_kv_for_q_nope = current_kv_for_q_nope.to(kv.dtype)  # Cast back to original dtype (bfloat16)
             current_pe_for_q_pe = k_pe.squeeze(2)
             
             # Update persistent caches with proper handling for training vs generation
