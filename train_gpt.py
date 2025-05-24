@@ -766,29 +766,46 @@ class MLA(nn.Module):
         kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         k_pe = apply_rotary_emb(k_pe.unsqueeze(2), freqs_cis)
         if attn_impl == "naive":
-            q = torch.cat([q_nope, q_pe], dim=-1)
-            kv = self.wkv_b(self.kv_norm(kv))
-            kv = kv.view(bsz, seqlen, self.n_local_heads, self.qk_nope_head_dim + self.v_head_dim)
-            k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-            k = torch.cat([k_nope, k_pe.expand(-1, -1, self.n_local_heads, -1)], dim=-1)
-            self.k_cache[:bsz, start_pos:end_pos] = k
-            self.v_cache[:bsz, start_pos:end_pos] = v
-            scores = torch.einsum("bshd,bthd->bsht", q, self.k_cache[:bsz, :end_pos]) * self.softmax_scale
+            print("We should not be using this for now.")
+            # q = torch.cat([q_nope, q_pe], dim=-1)
+            # kv = self.wkv_b(self.kv_norm(kv))
+            # kv = kv.view(bsz, seqlen, self.n_local_heads, self.qk_nope_head_dim + self.v_head_dim)
+            # k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+            # k = torch.cat([k_nope, k_pe.expand(-1, -1, self.n_local_heads, -1)], dim=-1)
+            # self.k_cache[:bsz, start_pos:end_pos] = k
+            # self.v_cache[:bsz, start_pos:end_pos] = v
+            # scores = torch.einsum("bshd,bthd->bsht", q, self.k_cache[:bsz, :end_pos]) * self.softmax_scale
         else:
             wkv_b = self.wkv_b.weight if self.wkv_b.scale is None else weight_dequant(self.wkv_b.weight, self.wkv_b.scale, block_size) 
             wkv_b = wkv_b.view(self.n_local_heads, -1, self.kv_lora_rank)
             q_nope = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, :self.qk_nope_head_dim])
-            self.kv_cache[:bsz, start_pos:end_pos] = self.kv_norm(kv)
-            self.pe_cache[:bsz, start_pos:end_pos] = k_pe.squeeze(2)
-            scores = (torch.einsum("bshc,btc->bsht", q_nope, self.kv_cache[:bsz, :end_pos]) +
-                      torch.einsum("bshr,btr->bsht", q_pe, self.pe_cache[:bsz, :end_pos])) * self.softmax_scale
+            
+            # Compute current K/V values into local, gradient-tracked tensors
+            current_kv_for_q_nope = self.kv_norm(kv)
+            current_pe_for_q_pe = k_pe.squeeze(2)
+            
+            # Update persistent caches with proper handling for training vs generation
+            if start_pos == 0:  # Typical for training iterations
+                self.kv_cache[:bsz, :seqlen] = current_kv_for_q_nope.detach()
+                self.pe_cache[:bsz, :seqlen] = current_pe_for_q_pe.detach()
+            else:  # Logic for generation/inference with start_pos > 0
+                self.kv_cache[:bsz, start_pos:end_pos] = current_kv_for_q_nope
+                self.pe_cache[:bsz, start_pos:end_pos] = current_pe_for_q_pe
+            
+            # Select the tensors to use in einsum based on start_pos
+            effective_kv_for_einsum = current_kv_for_q_nope if start_pos == 0 else self.kv_cache[:bsz, :end_pos]
+            effective_pe_for_einsum = current_pe_for_q_pe if start_pos == 0 else self.pe_cache[:bsz, :end_pos]
+            
+            scores = (torch.einsum("bshc,btc->bsht", q_nope, effective_kv_for_einsum) +
+                    torch.einsum("bshr,btr->bsht", q_pe, effective_pe_for_einsum)) * self.softmax_scale
+        
         if mask is not None:
             scores += mask.unsqueeze(1)
         scores = scores.softmax(dim=-1, dtype=torch.float32).type_as(x)
         if attn_impl == "naive":
             x = torch.einsum("bsht,bthd->bshd", scores, self.v_cache[:bsz, :end_pos])
         else:
-            x = torch.einsum("bsht,btc->bshc", scores, self.kv_cache[:bsz, :end_pos])
+            x = torch.einsum("bsht,btc->bshc", scores, effective_kv_for_einsum)
             x = torch.einsum("bshc,hdc->bshd", x, wkv_b[:, -self.v_head_dim:])
         x = self.wo(x.flatten(2))
         return x
@@ -1225,10 +1242,10 @@ def get_lr(step: int):
         return w * 1.0 + (1 - w) * 0.1
 
 # Use a more memory-efficient compilation option
-# if args.use_fp8:
-#     model: nn.Module = torch.compile(model, dynamic=False)
-# else:
-#     model: nn.Module = torch.compile(model, dynamic=False, mode="reduce-overhead")
+if args.use_fp8:
+    model: nn.Module = torch.compile(model, dynamic=False)
+else:
+    model: nn.Module = torch.compile(model, dynamic=False, mode="reduce-overhead")
 
 # Add fallback mode to handle compilation errors
 import torch._dynamo
