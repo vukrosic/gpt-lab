@@ -31,7 +31,7 @@ import torch.distributed as dist
 #torch._inductor.config.max_autotune_gemm_backends = ["ATEN"]
 # -----------------------------------------------------------------------------
 # Custom operators: FP8 matmul by @YouJiacheng
-
+torch.autograd.set_detect_anomaly(True)
 # mla - DeepSeek parameters
 q_lora_rank: int = 0
 kv_lora_rank: int = 512
