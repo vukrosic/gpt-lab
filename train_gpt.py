@@ -927,17 +927,9 @@ class GPT(nn.Module):
         # In GPT.forward
         x = norm(x)
         raw_logits = self.lm_head(x).float()
-
-        print0(f"DEBUG: x before lm_head: min={x.min().item()}, max={x.max().item()}, has_nan={torch.isnan(x).any().item()}, has_inf={torch.isinf(x).any().item()}", console=True)
-        print0(f"DEBUG: raw_logits: min={raw_logits.min().item()}, max={raw_logits.max().item()}, has_nan={torch.isnan(raw_logits).any().item()}, has_inf={torch.isinf(raw_logits).any().item()}", console=True)
-
         scaling_factor = 7.5 * x.size(-1)**0.5
         scaled_input_to_sigmoid = raw_logits / scaling_factor
-        print0(f"DEBUG: input_to_sigmoid: min={scaled_input_to_sigmoid.min().item()}, max={scaled_input_to_sigmoid.max().item()}, has_nan={torch.isnan(scaled_input_to_sigmoid).any().item()}, has_inf={torch.isinf(scaled_input_to_sigmoid).any().item()}", console=True)
-
         final_logits = 30 * torch.sigmoid(scaled_input_to_sigmoid)
-        print0(f"DEBUG: final_logits before cross_entropy: min={final_logits.min().item()}, max={final_logits.max().item()}, has_nan={torch.isnan(final_logits).any().item()}, has_inf={torch.isinf(final_logits).any().item()}", console=True)
-
         # Original line:
         # logits = 30 * torch.sigmoid(logits / (7.5 * x.size(-1)**0.5)) 
         # return F.cross_entropy(logits.view(-1, logits.size(-1)), target_seq, ...)
