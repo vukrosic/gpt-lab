@@ -925,11 +925,14 @@ class GPT(nn.Module):
         #     return F.cross_entropy(logits.view(-1, logits.size(-1)), target_seq, 
         #                           reduction='sum' if self.training else 'mean')
         # In GPT.forward
+        # Compute final logits with proper softcapping
         x = norm(x)
         raw_logits = self.lm_head(x).float()
-        scaling_factor = 7.5 * x.size(-1)**0.5
-        scaled_input_to_sigmoid = raw_logits / scaling_factor
-        final_logits = 30 * torch.sigmoid(scaled_input_to_sigmoid)
+        
+        # Apply tanh-based softcapping (more stable than sigmoid-based)
+        # This follows the Gemma 2 approach: softcap_value * tanh(logits / softcap_value)
+        softcap_value = 30.0
+        final_logits = softcap_value * torch.tanh(raw_logits / softcap_value)
         # Original line:
         # logits = 30 * torch.sigmoid(logits / (7.5 * x.size(-1)**0.5)) 
         # return F.cross_entropy(logits.view(-1, logits.size(-1)), target_seq, ...)
