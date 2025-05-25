@@ -933,7 +933,12 @@ class GPT(nn.Module):
         # Original line:
         # logits = 30 * torch.sigmoid(logits / (7.5 * x.size(-1)**0.5)) 
         # return F.cross_entropy(logits.view(-1, logits.size(-1)), target_seq, ...)
-        return F.cross_entropy(final_logits.view(-1, final_logits.size(-1)), target_seq, reduction='sum' if self.training else 'mean')
+        # Return logits during inference, compute loss during training
+        if target_seq is None:
+            return final_logits
+        else:
+            return F.cross_entropy(final_logits.view(-1, final_logits.size(-1)), target_seq, 
+                                reduction='sum' if self.training else 'mean')
 
     def get_num_params(self):
         """
