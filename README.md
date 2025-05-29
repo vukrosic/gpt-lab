@@ -1,17 +1,13 @@
 # GPT-Lab **(currently in ALPHA)**
-this repo is a massive overhaul of [Modded-NanoGPT](https://github.com/KellerJordan/modded-nanogpt) with the goal of being a base for amateurs to do cheap & easy LLM experiments at a large enough scale to be worthy of an arxiv preprint. the idea is that repos like Modded-NanoGPT, [NanoGPT](https://github.com/karpathy/nanoGPT), [TinyLlama](https://github.com/jzhang38/TinyLlama), and [Meta's Lingua](https://github.com/facebookresearch/lingua), are either too old of an architecture, too purpose-specific, not from-scratch enough, too expensive to run, too overly-complicated, not well setup for quickly iterating research ideas, etc and we plan to occupy a unique balance of those trade-offs
+This repo is a significant enhancement of [Modded-NanoGPT](https://github.com/KellerJordan/modded-nanogpt) with the goal of being a foundation for researchers to conduct cost-effective & accessible LLM experiments at a scale suitable for academic publication. The idea is that repos like Modded-NanoGPT, [NanoGPT](https://github.com/karpathy/nanoGPT), [TinyLlama](https://github.com/jzhang38/TinyLlama), and [Meta's Lingua](https://github.com/facebookresearch/lingua), are either using outdated architectures, too specialized, not sufficiently from-scratch, too resource-intensive, overly complex, or not well configured for rapid research iteration, and we aim to find an optimal balance of these trade-offs
 
-**this repo is currently in alpha, meaning that I think it's somewhat workable but have not utilized it on enough of my own experiments to guarantee that. before taking it out of alpha I will:**
+**This repo is currently in alpha, meaning that while it's functional, it hasn't been thoroughly tested across enough experiments to guarantee reliability. Before moving out of alpha, we will:**
     
 1. implement the further improvements defined in the todo section below and 
-2. go and implement a few experiment ideas and use what I learn from the difficulties I run into to add more things to the todo list
+2. conduct several experiments and use the insights gained from challenges encountered to expand the todo list
 
-check out the video I made about it:
-
-[![ERROR DISPLAYING IMAGE, CLICK HERE FOR VIDEO](https://img.youtube.com/vi/4cvBgHMDISs/0.jpg)](https://www.youtube.com/watch?v=4cvBgHMDISs)
-
-## getting started
-the input arguments in these instructions are comically small values designed to get you up and running on the tiniest GPU(s) for demonstration purposes; in practice you'll have to tune them to properly utilize the available VRAM of your setup
+## Getting Started
+The input arguments in these instructions are comically small values designed to get you up and running on the tiniest GPU(s) for demonstration purposes; in practice you'll have to tune them to properly utilize the available VRAM of your setup
 
 1. either have one or more GPUs or hook up to a cloud GPU. for the latter see [this tutorial](https://youtu.be/mmRlZKFLAvE); i recommend [vast.ai](vast.ai) since they're always at or near the cheapest
 2. either fork or create a template of this repo
