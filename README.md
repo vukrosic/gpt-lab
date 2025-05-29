@@ -125,7 +125,7 @@ we've trained some baselines for your experiments to compare against. For now (w
 - [ ] write latex preprint skeleton for others to begin theirs from
     - [ ] specifics of the Modded-NanoGPT architecture in an appendix
     - [ ] write a few scripts that take experiment directories as input and output loss plot, benchmark tables, etc
-- [ ] implement some sort of SFT/RLHF/DPO/RL as an option for the largest scale of model once the field settles on a technique? I don't think this makes sense given that even if our model size is big enough the odds that anybody is training on enough data for a model to be useable is pretty low for the time being
+- [ ] implement some sort of SFT/RLHF/DPO/RL as an option for the largest scale of model once the field settles on a technique? I don't think this makes sense given that even if our model size is big enough the odds that anybody is training on enough data for a model to be useable is pretty low for the time being.
 
 
 
