@@ -453,7 +453,7 @@ class Linear(nn.Module):
         bias (bool): Whether to include a bias term. Defaults to False.
         dtype (optional): Data type for the layer. Defaults to `torch.bfloat16`.
     """
-    dtype = torch.bfloat16
+    # dtype = torch.bfloat16
 
     def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype = None):
         super().__init__()
@@ -1407,7 +1407,7 @@ for step in range(args.train_steps + 1):
     # Unscale the gradients of both optimizers before they are used
     scaler.unscale_(optimizer1)
     scaler.unscale_(optimizer2)
-    
+
     scaler.step(optimizer1)
     scaler.step(optimizer2)
     scaler.update()
