@@ -927,8 +927,7 @@ class GPT(nn.Module):
         # In GPT.forward
         # Compute final logits with proper softcapping
         x = norm(x)
-        # raw_logits = self.lm_head(x).float()
-        raw_logits = F.linear(x.float(), self.lm_head.weight.float())
+        raw_logits = self.lm_head(x).float()
         
         # Apply tanh-based softcapping (more stable than sigmoid-based)
         # This follows the Gemma 2 approach: softcap_value * tanh(logits / softcap_value)
@@ -1184,6 +1183,8 @@ if args.seed is not None:
         # torch.backends.cudnn.deterministic = True
         # torch.backends.cudnn.benchmark = False
 
+from torch.cuda.amp import autocast, GradScaler
+
 ########################################
 #    Construct model and optimizer     #
 ########################################
@@ -1297,6 +1298,8 @@ print0("kernels are toasty", console=True)
 #        Training and validation       #
 ########################################
 
+scaler = torch.amp.GradScaler('cuda')
+
 train_loader = distributed_data_generator(args.train_files, world_size * args.train_seq_len, rank, world_size)
 
 training_time_ms = 0
@@ -1378,9 +1381,11 @@ for step in range(args.train_steps + 1):
             inputs = inputs[:args.train_seq_len]
             targets = targets[:args.train_seq_len]
         torch.compiler.cudagraph_mark_step_begin()
-        step_loss = model(inputs, targets)
-        loss += step_loss / args.grad_acc_steps
-    loss.backward()
+        with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
+            step_loss = model(inputs, targets)
+            loss += step_loss / args.grad_acc_steps
+    # loss.backward()
+    scaler.scale(loss).backward()
         
     if world_size > 1:
         for param in model.parameters():
@@ -1393,8 +1398,11 @@ for step in range(args.train_steps + 1):
         frac = min(step / 300, 1) # momentum warmup for muon
         group["momentum"] = (1 - frac) * 0.85 + frac * 0.95
     # step the optimizers
-    for opt in optimizers:
-        opt.step()
+    # for opt in optimizers:
+    #     opt.step()
+    scaler.step(optimizer1)
+    scaler.step(optimizer2)
+    scaler.update()
     # null the gradients
     model.zero_grad(set_to_none=True)
         
