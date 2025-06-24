@@ -927,7 +927,8 @@ class GPT(nn.Module):
         # In GPT.forward
         # Compute final logits with proper softcapping
         x = norm(x)
-        raw_logits = self.lm_head(x).float()
+        # raw_logits = self.lm_head(x).float()
+        raw_logits = F.linear(x.float(), self.lm_head.weight.float())
         
         # Apply tanh-based softcapping (more stable than sigmoid-based)
         # This follows the Gemma 2 approach: softcap_value * tanh(logits / softcap_value)
