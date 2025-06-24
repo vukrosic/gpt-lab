@@ -459,7 +459,7 @@ class Linear(nn.Module):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype or Linear.dtype))
+        self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype))
         if self.weight.element_size() == 1:
             scale_out_features = (out_features + block_size - 1) // block_size
             scale_in_features = (in_features + block_size - 1) // block_size
@@ -1206,9 +1206,9 @@ print0(model)
 # Set FP8 option based on hyperparameters
 model.lm_head.use_fp8 = args.use_fp8
 
-for m in model.modules():
-    if isinstance(m, nn.Embedding):
-        m.bfloat16()
+# for m in model.modules():
+#     if isinstance(m, nn.Embedding):
+#         m.bfloat16()
 if world_size > 1:
     for param in model.parameters():
         dist.broadcast(param.detach(), 0)
