@@ -363,27 +363,27 @@ class Muon(torch.optim.Optimizer):
 def norm(x: Tensor):
     return F.rms_norm(x, (x.size(-1),))
 
-class CastedLinear(nn.Linear):
-    def __init__(self, in_features: int, out_features: int, use_fp8=False, x_s=1.0, w_s=1.0, grad_s=1.0):
-        super().__init__(in_features, out_features, bias=False)
-        self.use_fp8 = use_fp8
-        self.x_s = x_s
-        self.w_s = w_s
-        self.grad_s = grad_s
+# class CastedLinear(nn.Linear):
+#     def __init__(self, in_features: int, out_features: int, use_fp8=False, x_s=1.0, w_s=1.0, grad_s=1.0):
+#         super().__init__(in_features, out_features, bias=False)
+#         self.use_fp8 = use_fp8
+#         self.x_s = x_s
+#         self.w_s = w_s
+#         self.grad_s = grad_s
 
-    def reset_parameters(self) -> None:
-        std = 0.5 * (self.in_features ** -0.5) # 0.5 is a bit better than the default 1/sqrt(3)
-        bound = (3 ** 0.5) * std
-        with torch.no_grad():
-            self.weight.uniform_(-bound, bound)
+#     def reset_parameters(self) -> None:
+#         std = 0.5 * (self.in_features ** -0.5) # 0.5 is a bit better than the default 1/sqrt(3)
+#         bound = (3 ** 0.5) * std
+#         with torch.no_grad():
+#             self.weight.uniform_(-bound, bound)
 
-    def forward(self, x: Tensor):
-        if self.use_fp8 and self.training:
-            _x = x.flatten(0, -2)
-            out: Tensor = torch.ops.nanogpt.mm(_x, self.weight, x_s=self.x_s, w_s=self.w_s, grad_s=self.grad_s)[0]
-            return out.reshape(*x.shape[:-1], -1)
-        else:
-            return F.linear(x, self.weight.type_as(x))
+#     def forward(self, x: Tensor):
+#         if self.use_fp8 and self.training:
+#             _x = x.flatten(0, -2)
+#             out: Tensor = torch.ops.nanogpt.mm(_x, self.weight, x_s=self.x_s, w_s=self.w_s, grad_s=self.grad_s)[0]
+#             return out.reshape(*x.shape[:-1], -1)
+#         else:
+#             return F.linear(x, self.weight.type_as(x))
 
 # class Rotary(nn.Module):
 #     def __init__(self, dim: int, max_seq_len: int):
@@ -816,10 +816,13 @@ class MLP(nn.Module):
     def __init__(self, dim: int, mlp_ratio: int = 4):
         super().__init__()
         hdim = int(mlp_ratio * dim)
-        self.c_fc = CastedLinear(dim, hdim)
-        self.c_proj = CastedLinear(hdim, dim)
+        self.c_fc = nn.Linear(dim, hdim, bias=False)
+        self.c_proj = nn.Linear(hdim, dim, bias=False)
         # self.c_proj.weight.detach().zero_() # zero init suggested by @Grad62304977
         with torch.no_grad():
+            std = 0.5 * (dim ** -0.5)
+            bound = (3 ** 0.5) * std
+            self.c_fc.weight.uniform_(-bound, bound)
             self.c_proj.weight.zero_()
 
 
@@ -869,9 +872,10 @@ class GPT(nn.Module):
         self.blocks = nn.ModuleList([Block(model_dim, num_heads, mlp_ratio, max_seq_len, i) for i in range(num_layers)])
         # there are only 50257 unique GPT-2 tokens; we extend to nearest multiple of 128 for efficiency.
         # suggested by @Grad62304977. this originates from Karpathy's experiments.
-        self.lm_head = CastedLinear(model_dim, next_multiple_of_n(vocab_size, n=128),
-                                    use_fp8=False, x_s=(model_dim**0.5)/448, w_s=24/448, grad_s=1/448)
-        self.lm_head.weight.detach().zero_() # @Grad62304977
+        self.lm_head = nn.Linear(model_dim, next_multiple_of_n(vocab_size, n=128), bias=False)
+        with torch.no_grad():
+            self.lm_head.weight.zero_() # @Grad62304977
+        # self.lm_head.weight.detach().zero_() # @Grad62304977
         # Add learnable skip connection weights for decoder layers
         self.skip_weights = nn.Parameter(torch.ones(num_layers//2))
         self.register_buffer("freqs_cis", precompute_freqs_cis(), persistent=False)
@@ -927,7 +931,7 @@ class GPT(nn.Module):
         # In GPT.forward
         # Compute final logits with proper softcapping
         x = norm(x)
-        raw_logits = self.lm_head(x).float()
+        raw_logits = self.lm_head(x)
         
         # Apply tanh-based softcapping (more stable than sigmoid-based)
         # This follows the Gemma 2 approach: softcap_value * tanh(logits / softcap_value)
@@ -1400,6 +1404,10 @@ for step in range(args.train_steps + 1):
     # step the optimizers
     # for opt in optimizers:
     #     opt.step()
+    # Unscale the gradients of both optimizers before they are used
+    scaler.unscale_(optimizer1)
+    scaler.unscale_(optimizer2)
+    
     scaler.step(optimizer1)
     scaler.step(optimizer2)
     scaler.update()
