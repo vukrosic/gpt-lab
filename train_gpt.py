@@ -249,7 +249,9 @@ def zeropower_via_newtonschulz5(G: Tensor, steps: int) -> Tensor:
     X = G.bfloat16()
     if G.size(-2) > G.size(-1):
         X = X.mT
-
+    print("G.shape")
+    print(G.shape)
+    print(G.size)
     # Ensure spectral norm is at most 1
     X = X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)
     # Perform the NS iterations
